@@ -11,15 +11,6 @@ USUARIOS_RAW = os.getenv("LISTA_USUARIOS", "")
 # Limpieza de lista: acepta comas o saltos de línea
 USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.strip()]
 
-def enviar_texto_telegram(texto):
-    """Envía un mensaje de texto simple a Telegram."""
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {'chat_id': CHAT_ID, 'text': texto}
-    try:
-        requests.post(url, data=payload)
-    except Exception as e:
-        print(f"Error enviando texto a Telegram: {e}")
-
 def enviar_video_telegram(video_path, caption):
     """Envía un archivo de vídeo a Telegram."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
@@ -40,7 +31,6 @@ if not USUARIOS:
 
 # 1. Mensaje de inicio (Antes de todo)
 print(f"🚀 Bot despertando... Detectadas {len(USUARIOS)} cuentas.")
-enviar_texto_telegram(f"🚀 Empieza la descarga. Revisando {len(USUARIOS)} cuentas de TikTok...")
 
 if not os.path.exists("temp_videos"):
     os.makedirs("temp_videos")
