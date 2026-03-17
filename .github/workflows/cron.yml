@@ -1,7 +1,7 @@
 name: Download
 on:
   schedule:
-    - cron: '*/6 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
