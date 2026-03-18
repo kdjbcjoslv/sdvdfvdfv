@@ -48,14 +48,14 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # 1. Añadimos el archivo de historial
-          git add archive.txt
+          # 1. Añadimos el archivo CIFRADO (.gpg), que es el que realmente existe ahora
+          git add archive.txt.gpg
           
-          # 2. Hacemos el commit. El "|| echo" evita que el script falle si no hay vídeos nuevos
+          # 2. Hacemos el commit
           git commit -m "Historial actualizado (Cifrado)" || exit 0
           
-          # 3. EL TRUCO: Traer los cambios más recientes y poner los nuestros encima
+          # 3. Traer cambios de la nube para evitar el error de antes
           git pull --rebase origin main
           
-          # 4. Ahora sí, subimos sin miedo
+          # 4. Subir los cambios
           git push
