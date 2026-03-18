@@ -14,36 +14,35 @@ USUARIOS_RAW = os.getenv("LISTA_USUARIOS", "")
 USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.strip()]
 
 def logger(mensaje, **kwargs):
-    """Logs anónimos para GitHub Actions."""
+    """Logs 100% anónimos para GitHub Actions."""
     print(mensaje, flush=True, **kwargs)
 
 def limpiar_hashtag(nombre):
-    """Crea un hashtag válido sin puntos ni caracteres raros."""
+    """Hashtag sin caracteres prohibidos."""
     nombre = nombre.lstrip('@')
     tag = re.sub(r'[^a-zA-Z0-9_]', '_', nombre)
     return re.sub(r'_+', '_', tag).strip('_')
 
 def eliminar_id_de_archivo(video_id):
-    """Limpia el ID del historial para permitir reintentos."""
+    """Limpia el ID del archive.txt para reintentar."""
     if not os.path.exists("archive.txt"): return
     try:
         with open("archive.txt", "r") as f:
             lineas = f.readlines()
         with open("archive.txt", "w") as f:
             for linea in lineas:
+                # Si la línea contiene el ID (ej: tiktok 12345), la borramos
                 if video_id not in linea:
                     f.write(linea)
-        logger("    ♻️ Historial reseteado para este post.")
+        logger("    ♻️ Historial reseteado para este ID.")
     except Exception: pass
 
-# --- NUEVA FUNCIÓN DE ENVÍO POR LOTES ---
+# --- SISTEMA DE ENVÍO DE LOTES ---
 def enviar_carrusel_completo(archivos_fotos, caption):
-    """Divide las fotos en grupos de 10 y las envía todas."""
+    """Manda todas las fotos del carrusel en grupos de 10."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup"
     exito_total = True
     
-    # Dividimos la lista de fotos en trozos de 10
-    # Ejemplo: Si hay 25 fotos, hará 3 envíos (10, 10 y 5)
     for i in range(0, len(archivos_fotos), 10):
         lote = archivos_fotos[i : i + 10]
         n_lote = (i // 10) + 1
@@ -53,8 +52,12 @@ def enviar_carrusel_completo(archivos_fotos, caption):
         
         for j, path in enumerate(lote):
             file_key = f"f{j}"
-            # Solo ponemos el caption en la primera foto del primer lote
-            txt = f"{caption} (Parte {n_lote})" if i > 0 and j == 0 else (caption if i == 0 and j == 0 else "")
+            # Solo la primera foto del primer álbum lleva el caption principal
+            txt = ""
+            if i == 0 and j == 0:
+                txt = caption
+            elif j == 0:
+                txt = f"Sigue del anterior (Parte {n_lote})"
             
             media.append({
                 'type': 'photo',
@@ -68,9 +71,8 @@ def enviar_carrusel_completo(archivos_fotos, caption):
             r = requests.post(url, data={'chat_id': CHAT_ID, 'media': json.dumps(media)}, files=files)
             if r.status_code != 200:
                 exito_total = False
-                logger(f"    ❌ Error en lote {n_lote}: {r.status_code}")
+                logger(f"    ❌ Error lote {n_lote}: {r.status_code}")
             
-            # Cerrar archivos y esperar un poco para no saturar
             for f in files.values(): f.close()
             time.sleep(2) 
         except Exception:
@@ -80,7 +82,7 @@ def enviar_carrusel_completo(archivos_fotos, caption):
     return exito_total
 
 def enviar_single(tipo, path, caption):
-    """Envía un archivo individual (vídeo o foto suelta)."""
+    """Manda un vídeo o una foto sola."""
     metodo = "sendVideo" if tipo == "video" else "sendPhoto"
     url = f"https://api.telegram.org/bot{TOKEN}/{metodo}"
     try:
@@ -100,9 +102,10 @@ for i, user in enumerate(USUARIOS, 1):
     tiktok_user = user if user.startswith('@') else f'@{user}'
     user_hashtag = limpiar_hashtag(user)
     
-    # Caption que solo se verá en Telegram
+    # Texto que verás en Telegram
     caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
 
+    # DESCARGA
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
         '--download-archive', 'archive.txt',
@@ -113,15 +116,20 @@ for i, user in enumerate(USUARIOS, 1):
         f'https://www.tiktok.com/{tiktok_user}'
     ])
 
-    # Agrupar por ID para no separar carruseles
-    archivos_actuales = glob.glob("temp_media/*")
-    ids_en_carpeta = set(os.path.basename(f).split('.')[0] for f in archivos_actuales)
+    # AGRUPACIÓN INTELIGENTE
+    archivos_en_carpeta = glob.glob("temp_media/*")
+    # Sacamos el ID real: quitamos el path y todo lo que haya después del primer punto
+    ids_en_carpeta = set(os.path.basename(f).split('.')[0] for f in archivos_en_carpeta)
 
     for vid_id in ids_en_carpeta:
-        post_files = sorted(glob.glob(f"temp_media/{vid_id}.*"))
+        # El cambio clave: buscamos cualquier archivo que EMPIECE por el ID
+        # Esto captura ID.jpg, ID.f1.jpg, ID.mp4, etc.
+        post_files = sorted(glob.glob(f"temp_media/{vid_id}*"))
         
         fotos = [f for f in post_files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
         videos = [f for f in post_files if f.lower().endswith(('.mp4', '.webm', '.mov'))]
+
+        if not fotos and not videos: continue
 
         exito = False
         if videos:
@@ -129,7 +137,7 @@ for i, user in enumerate(USUARIOS, 1):
             exito = enviar_single("video", videos[0], caption_tg)
         elif fotos:
             if len(fotos) > 1:
-                logger(f"  🖼️ Enviando carrusel completo ({len(fotos)} fotos)...")
+                logger(f"  🖼️ Enviando carrusel ({len(fotos)} fotos)...")
                 exito = enviar_carrusel_completo(fotos, caption_tg)
             else:
                 logger(f"  📷 Enviando foto suelta...")
