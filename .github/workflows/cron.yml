@@ -43,10 +43,19 @@ jobs:
           gpg --quiet --batch --yes --symmetric --passphrase="$GPG_KEY" --output archive.txt.gpg archive.txt
           rm archive.txt
 
-      - name: Subir cambios al repo
+      - name: Guardar historial y subir cambios
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add archive.txt.gpg
-          git commit -m "Historial actualizado (Cifrado)" || echo "No hay cambios"
+          
+          # 1. Añadimos el archivo de historial
+          git add archive.txt
+          
+          # 2. Hacemos el commit. El "|| echo" evita que el script falle si no hay vídeos nuevos
+          git commit -m "Historial actualizado (Cifrado)" || exit 0
+          
+          # 3. EL TRUCO: Traer los cambios más recientes y poner los nuestros encima
+          git pull --rebase origin main
+          
+          # 4. Ahora sí, subimos sin miedo
           git push
