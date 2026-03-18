@@ -168,6 +168,7 @@ for i, user in enumerate(USUARIOS, 1):
 
     for vid_id, post_files in grupos.items():
         post_files = sorted(post_files)
+        logger(f"    🔍 Archivos del grupo {vid_id}: {post_files}")
         fotos = [f for f in post_files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
         videos = [f for f in post_files if f.lower().endswith(('.mp4', '.webm', '.mov'))]
 
