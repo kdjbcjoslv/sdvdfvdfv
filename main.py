@@ -2,104 +2,106 @@ import os
 import subprocess
 import requests
 import glob
+import sys
+import time
 
-# --- CONFIGURACIÓN Y CARGA DE SECRETOS ---
+def logger(mensaje):
+    print(mensaje, flush=True)
+
+def eliminar_id_de_archivo(video_id, archive_path="archive.txt"):
+    """Elimina la línea del ID del video de archive.txt si el envío falló."""
+    if not os.path.exists(archive_path):
+        return
+    
+    linea_a_eliminar = f"tiktok {video_id}\n"
+    
+    with open(archive_path, "r") as f:
+        lineas = f.readlines()
+    
+    with open(archive_path, "w") as f:
+        for linea in lineas:
+            # Si la línea no es la del video que falló, la mantenemos
+            if linea.strip() != linea_a_eliminar.strip():
+                f.write(linea)
+    logger(f"    ♻️ ID {video_id} eliminado de archive.txt (se reintentará luego).")
+
+def enviar_con_reintento(tipo, path, caption):
+    """Envía media con gestión de Rate Limit (Error 429)."""
+    metodo = "sendVideo" if tipo == "video" else "sendPhoto"
+    url = f"https://api.telegram.org/bot{os.getenv('TELEGRAM_TOKEN')}/{metodo}"
+    
+    intentos = 0
+    while intentos < 2:
+        try:
+            with open(path, 'rb') as f:
+                payload = {'chat_id': os.getenv("TELEGRAM_CHAT_ID"), 'caption': caption, 'parse_mode': 'HTML'}
+                files = {tipo: f}
+                r = requests.post(url, data=payload, files=files)
+                
+                if r.status_code == 200:
+                    return True
+                
+                if r.status_code == 429:
+                    espera = r.json().get('parameters', {}).get('retry_after', 20)
+                    logger(f"    ⚠️ Rate Limit. Esperando {espera}s...")
+                    time.sleep(espera + 1)
+                    intentos += 1
+                    continue 
+                
+                logger(f"    ❌ Error API: {r.status_code}")
+                return False
+        except Exception as e:
+            logger(f"    ❌ Error de conexión: {e}")
+            return False
+    return False
+
+# --- INICIO ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USUARIOS_RAW = os.getenv("LISTA_USUARIOS", "")
-
 USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.strip()]
 
-def enviar_video_telegram(video_path, caption):
-    """Envía un vídeo a Telegram con soporte para HTML."""
-    url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
-    try:
-        with open(video_path, 'rb') as video:
-            payload = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
-            files = {'video': video}
-            r = requests.post(url, data=payload, files=files)
-            if r.status_code != 200:
-                print(f"    ❌ Error API Telegram (Video): Código {r.status_code} - {r.text}")
-            return r.status_code == 200
-    except Exception as e:
-        print(f"    ❌ Error de conexión (Video): {e}")
-        return False
-
-def enviar_foto_telegram(photo_path, caption):
-    """Envía una foto a Telegram con soporte para HTML."""
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    try:
-        with open(photo_path, 'rb') as photo:
-            payload = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
-            files = {'photo': photo}
-            r = requests.post(url, data=payload, files=files)
-            if r.status_code != 200:
-                print(f"    ❌ Error API Telegram (Foto): Código {r.status_code} - {r.text}")
-            return r.status_code == 200
-    except Exception as e:
-        print(f"    ❌ Error de conexión (Foto): {e}")
-        return False
-
-# --- INICIO DEL PROCESO ---
-
-print("--- 🛠️ INICIO DEL DEBUG ---")
-if not TOKEN: print("⚠️ Alerta: TOKEN no configurado.")
-if not CHAT_ID: print("⚠️ Alerta: CHAT_ID no configurado.")
-
-if not USUARIOS:
-    print("❌ Error: Lista de usuarios vacía o no detectada.")
-    exit()
-
-print(f"🚀 Bot despertando... Analizando {len(USUARIOS)} cuentas en total.")
+logger("--- 🛠️ DEBUG INICIADO (Lógica de Archivo Dinámica) ---")
 
 if not os.path.exists("temp_media"):
     os.makedirs("temp_media")
-    print("📁 Carpeta temporal creada.")
 
 for i, user in enumerate(USUARIOS, 1):
-    print(f"\n👤 [Usuario #{i}] Iniciando descarga...")
+    logger(f"\n👤 [Usuario #{i}] Analizando...")
     tiktok_user = user if user.startswith('@') else f'@{user}'
     
-    # Ejecución de yt-dlp con captura de errores
-    resultado_dl = subprocess.run([
-        'yt-dlp',
-        '--quiet', '--no-warnings',
+    # IMPORTANTE: El nombre del archivo contendrá el ID para poder recuperarlo si falla
+    # Formato: temp_media/ID_DEL_VIDEO.ext
+    subprocess.run([
+        'yt-dlp', '--quiet', '--no-warnings',
         '--download-archive', 'archive.txt',
         '--dateafter', 'now-4day',
         '--playlist-end', '20',
         '--impersonate', 'chrome',
-        '-o', 'temp_media/%(uploader)s_%(id)s.%(ext)s', 
+        '-o', 'temp_media/%(id)s.%(ext)s', 
         f'https://www.tiktok.com/{tiktok_user}'
-    ], capture_output=True, text=True)
+    ])
 
-    if resultado_dl.returncode != 0:
-        print(f"  ⚠️ Error en yt-dlp para Usuario #{i}. Saltando a revisión de archivos...")
-        # No hacemos exit() para que siga con el siguiente usuario
-    else:
-        print(f"  📥 Descarga completada para Usuario #{i}.")
-
-    # 3. Procesar archivos descargados
     archivos = glob.glob("temp_media/*")
-    if not archivos:
-        print(f"  Empty: No hay archivos nuevos para el Usuario #{i}.")
-    
     for j, file_path in enumerate(archivos, 1):
+        # El ID es el nombre del archivo (quitando la extensión)
+        video_id = os.path.splitext(os.path.basename(file_path))[0]
         ext = os.path.splitext(file_path)[1].lower()
-        # Mantenemos el caption original con el link real, pero el log de consola será anónimo
+        tipo = "video" if ext in ['.mp4', '.webm', '.mov'] else "photo"
         caption = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>'
+
+        logger(f"  📦 Archivo #{j} de Usuario #{i}...", end="")
         
-        print(f"  📦 Procesando Archivo #{j} de Usuario #{i} (Ext: {ext})...", end=" ")
-        
-        exito = False
-        if ext in ['.mp4', '.webm', '.mov']:
-            exito = enviar_video_telegram(file_path, caption)
-        elif ext in ['.jpg', '.jpeg', '.png', '.webp']:
-            exito = enviar_foto_telegram(file_path, caption)
+        exito = enviar_con_reintento(tipo, file_path, caption)
         
         if exito:
             os.remove(file_path)
-            print("✅ OK")
+            logger(" ✅ OK")
         else:
-            print("❌ FALLÓ")
+            # SI FALLA: Borramos el ID del archive.txt para que yt-dlp lo vuelva a ver "nuevo"
+            logger(" ❌ FALLÓ")
+            eliminar_id_de_archivo(video_id)
+            if os.path.exists(file_path):
+                os.remove(file_path) # Limpiamos el temporal para no duplicar espacio
 
-print("\n--- ✨ Proceso finalizado ---")
+logger("\n--- ✨ Proceso terminado ---")
