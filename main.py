@@ -5,8 +5,8 @@ import glob
 import sys
 import time
 
-def logger(mensaje):
-    print(mensaje, flush=True)
+def logger(mensaje, **kwargs):
+    print(mensaje, flush=True, **kwargs)
 
 def eliminar_id_de_archivo(video_id, archive_path="archive.txt"):
     """Elimina la línea del ID del video de archive.txt si el envío falló."""
