@@ -15,6 +15,7 @@ USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.s
 AUDIO_EXTS = ('.m4a', '.mp3', '.aac', '.ogg', '.opus')
 FOTO_EXTS  = ('.jpg', '.jpeg', '.png', '.webp')
 VIDEO_EXTS = ('.mp4', '.webm', '.mov')
+ARCHIVE    = "archive.txt"
 
 def logger(mensaje, **kwargs):
     print(mensaje, flush=True, **kwargs)
@@ -24,18 +25,31 @@ def limpiar_hashtag(nombre):
     tag = re.sub(r'[^a-zA-Z0-9_]', '_', nombre)
     return re.sub(r'_+', '_', tag).strip('_')
 
-def eliminar_id_de_archivo(video_id):
-    if not os.path.exists("archive.txt"):
-        return
-    try:
-        with open("archive.txt", "r") as f:
-            lineas = f.readlines()
-        with open("archive.txt", "w") as f:
-            for linea in lineas:
-                if video_id not in linea:
-                    f.write(linea)
-    except Exception:
-        pass
+def cargar_archive():
+    """Devuelve un set con todos los IDs ya procesados."""
+    if not os.path.exists(ARCHIVE):
+        return set()
+    with open(ARCHIVE, "r") as f:
+        ids = set()
+        for line in f:
+            line = line.strip()
+            if line:
+                # formato yt-dlp: "youtube ID" o simplemente "ID"
+                partes = line.split()
+                ids.add(partes[-1])
+        return ids
+
+def guardar_en_archive(video_id):
+    """Marca un ID como procesado."""
+    with open(ARCHIVE, "a") as f:
+        f.write(f"tiktok {video_id}\n")
+
+def limpiar_temp():
+    for f in glob.glob("temp_media/*"):
+        try:
+            os.remove(f)
+        except Exception:
+            pass
 
 # --- SISTEMA DE ENVÍO ---
 def enviar_carrusel_completo(archivos_fotos, caption):
@@ -92,30 +106,6 @@ def enviar_single(tipo, path, caption):
     except Exception:
         return False
 
-def limpiar_temp():
-    for f in glob.glob("temp_media/*"):
-        try:
-            os.remove(f)
-        except Exception:
-            pass
-
-def descargar(url_tiktok, formato, output_template):
-    """Lanza yt-dlp con el formato y template indicados."""
-    cmd = [
-        'yt-dlp',
-        '--quiet',
-        '--no-warnings',
-        '--download-archive', 'archive.txt',
-        '--dateafter', 'now-4day',
-        '--playlist-end', '5',
-        '--impersonate', 'chrome',
-        '--no-write-playlist-metafiles',
-        '-f', formato,
-        '-o', output_template,
-        url_tiktok
-    ]
-    subprocess.run(cmd, capture_output=True)
-
 def agrupar_archivos_por_id(archivos):
     grupos = {}
     for path in archivos:
@@ -125,23 +115,74 @@ def agrupar_archivos_por_id(archivos):
         grupos.setdefault(vid_id, []).append(path)
     return grupos
 
-def procesar_y_enviar(caption_tg):
-    """Agrupa y envía todo lo que haya en temp_media."""
+def descargar(url_tiktok, formato):
+    """Descarga sin --download-archive para no bloquear formatos alternativos."""
+    subprocess.run([
+        'yt-dlp',
+        '--quiet',
+        '--no-warnings',
+        '--dateafter', 'now-4day',
+        '--playlist-end', '5',
+        '--impersonate', 'chrome',
+        '--no-write-playlist-metafiles',
+        '-f', formato,
+        '-o', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s',
+        url_tiktok
+    ], capture_output=True)
+
+# --- PROCESO PRINCIPAL ---
+logger(f"--- 🛠️ INICIANDO SCAN ({len(USUARIOS)} cuentas) ---")
+if not os.path.exists("temp_media"):
+    os.makedirs("temp_media")
+
+for i, user in enumerate(USUARIOS, 1):
+    logger(f"\n👤 [Usuario #{i}] Procesando...")
+
+    limpiar_temp()
+
+    tiktok_user = user if user.startswith('@') else f'@{user}'
+    user_hashtag = limpiar_hashtag(user)
+    caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
+    url_base = f'https://www.tiktok.com/{tiktok_user}'
+
+    # Cargar IDs ya procesados
+    archive_ids = cargar_archive()
+
+    # DESCARGA 1: vídeos normales
+    logger("    ⬇️ Descargando vídeos...")
+    descargar(url_base, 'mp4/bestvideo+bestaudio/best')
+
+    # DESCARGA 2: carruseles (imágenes) — descarga aparte para no bloquearse con el archive
+    logger("    ⬇️ Descargando carruseles...")
+    descargar(url_base, 'jpg/jpeg/png/webp')
+
+    # Filtrar archivos descargados
     archivos = [
         f for f in glob.glob("temp_media/*")
         if not f.lower().endswith(AUDIO_EXTS)
         and not f.lower().endswith(('.html', '.json'))
     ]
+
     if not archivos:
-        return 0
+        logger("    ℹ️ Sin contenido nuevo")
+        continue
 
+    # Agrupar por ID y filtrar los ya procesados
     grupos = agrupar_archivos_por_id(archivos)
-    logger(f"    📂 {len(grupos)} post(s) encontrado(s)")
+    grupos_nuevos = {vid_id: files for vid_id, files in grupos.items() if vid_id not in archive_ids}
 
-    for vid_id, post_files in grupos.items():
+    if not grupos_nuevos:
+        logger("    ℹ️ Todo ya estaba en el archive")
+        limpiar_temp()
+        continue
+
+    logger(f"    📂 {len(grupos_nuevos)} post(s) nuevo(s)")
+
+    for vid_id, post_files in grupos_nuevos.items():
         post_files = sorted(post_files)
         logger(f"    🔍 Archivos: {[os.path.basename(f) for f in post_files]}")
 
+        # Si hay mezcla de fotos y vídeo del mismo ID, priorizar fotos (es carrusel)
         fotos  = [f for f in post_files if f.lower().endswith(FOTO_EXTS)]
         videos = [f for f in post_files if f.lower().endswith(VIDEO_EXTS)]
 
@@ -163,9 +204,9 @@ def procesar_y_enviar(caption_tg):
 
         if exito:
             logger("    ✅ Enviado con éxito")
+            guardar_en_archive(vid_id)  # Solo marcamos como procesado si fue exitoso
         else:
             logger("    ❌ Error en el envío")
-            eliminar_id_de_archivo(vid_id)
 
         for f in post_files:
             if os.path.exists(f):
@@ -173,48 +214,6 @@ def procesar_y_enviar(caption_tg):
                     os.remove(f)
                 except Exception:
                     pass
-
-    return len(grupos)
-
-# --- PROCESO PRINCIPAL ---
-logger(f"--- 🛠️ INICIANDO SCAN ({len(USUARIOS)} cuentas) ---")
-if not os.path.exists("temp_media"):
-    os.makedirs("temp_media")
-
-for i, user in enumerate(USUARIOS, 1):
-    logger(f"\n👤 [Usuario #{i}] Procesando...")
-
-    limpiar_temp()
-
-    tiktok_user = user if user.startswith('@') else f'@{user}'
-    user_hashtag = limpiar_hashtag(user)
-    caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
-    url_base = f'https://www.tiktok.com/{tiktok_user}'
-
-    # DESCARGA 1: vídeos normales
-    logger("    ⬇️ Descargando vídeos...")
-    descargar(url_base, 'mp4/bestvideo+bestaudio/best', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s')
-    procesar_y_enviar(caption_tg)
-    limpiar_temp()
-
-    # DESCARGA 2: carruseles (playlist de imágenes)
-    # DESCARGA 2: carruseles
-    logger("    ⬇️ Descargando carruseles...")
-    result = subprocess.run([
-        'yt-dlp',
-        '--no-warnings',
-        '--download-archive', 'archive.txt',
-        '--dateafter', 'now-4day',
-        '--playlist-end', '5',
-        '--impersonate', 'chrome',
-        '--no-write-playlist-metafiles',
-        '-f', 'jpg/jpeg/png/webp',
-        '-o', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s',
-        url_base
-    ], capture_output=True, text=True)
-    
-    logger(f"    STDOUT: {result.stdout[:500]}")
-    logger(f"    STDERR: {result.stderr[:500]}")
 
 # Limpieza final
 limpiar_temp()
