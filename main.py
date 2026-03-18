@@ -12,6 +12,10 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USUARIOS_RAW = os.getenv("LISTA_USUARIOS", "")
 USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.strip()]
 
+AUDIO_EXTS = ('.m4a', '.mp3', '.aac', '.ogg', '.opus')
+FOTO_EXTS  = ('.jpg', '.jpeg', '.png', '.webp')
+VIDEO_EXTS = ('.mp4', '.webm', '.mov')
+
 def logger(mensaje, **kwargs):
     print(mensaje, flush=True, **kwargs)
 
@@ -89,7 +93,6 @@ def enviar_single(tipo, path, caption):
         return False
 
 def limpiar_temp():
-    """Elimina todos los archivos de temp_media."""
     for f in glob.glob("temp_media/*"):
         try:
             os.remove(f)
@@ -97,28 +100,12 @@ def limpiar_temp():
             pass
 
 def agrupar_archivos_por_id(archivos):
-    """
-    Agrupa archivos por ID de video.
-    yt-dlp nombra los carruseles como:  <ID>_slideshow_<N>.<ext>
-    y los vídeos normales como:         <ID>.<ext>  o  <ID>_<playlist_index>.<ext>
-    """
     grupos = {}
     for path in archivos:
         basename = os.path.basename(path)
-        # Extraer el ID: todo lo que va antes del primer guion bajo o del punto
-        # Patrón: <ID>_slideshow_NNN.ext  →  ID = parte antes de "_slideshow"
-        # Patrón: <ID>_NN.ext             →  ID = parte antes de "_NN"
-        # Patrón: <ID>.ext                →  ID = parte antes de "."
         match = re.match(r'^([^_]+(?:_[^_]+)*?)(?:_slideshow_\d+|_\d+)?\.', basename)
-        if match:
-            vid_id = match.group(1)
-        else:
-            vid_id = basename.split('.')[0]
-
-        if vid_id not in grupos:
-            grupos[vid_id] = []
-        grupos[vid_id].append(path)
-
+        vid_id = match.group(1) if match else basename.split('.')[0]
+        grupos.setdefault(vid_id, []).append(path)
     return grupos
 
 # --- PROCESO PRINCIPAL ---
@@ -129,19 +116,14 @@ if not os.path.exists("temp_media"):
 for i, user in enumerate(USUARIOS, 1):
     logger(f"\n👤 [Usuario #{i}] Procesando...")
 
-    # Limpiar temp antes de cada usuario para evitar contaminación entre cuentas
     limpiar_temp()
 
     tiktok_user = user if user.startswith('@') else f'@{user}'
     user_hashtag = limpiar_hashtag(user)
     caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
 
-    # DESCARGA
-    # Notas clave:
-    #   - Para carruseles, yt-dlp descarga cada imagen por separado con sufijo _slideshow_NNN
-    #   - --no-write-playlist-metafiles evita archivos .json/.description basura
-    #   - El formato de salida usa %(id)s como raíz para poder agrupar después
-    resultado = subprocess.run([
+    # DESCARGA — prioriza imágenes sobre audio para carruseles
+    subprocess.run([
         'yt-dlp',
         '--quiet',
         '--no-warnings',
@@ -150,14 +132,17 @@ for i, user in enumerate(USUARIOS, 1):
         '--playlist-end', '5',
         '--impersonate', 'chrome',
         '--no-write-playlist-metafiles',
-        '--write-pages',              # necesario para que yt-dlp procese carruseles
+        '-f', 'jpg/jpeg/png/webp/mp4/best',
         '-o', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s',
         f'https://www.tiktok.com/{tiktok_user}'
     ], capture_output=True)
 
-    # AGRUPACIÓN MEJORADA
-    archivos = [f for f in glob.glob("temp_media/*")
-                if not f.endswith('.html') and not f.endswith('.json')]
+    # Excluir audio, html y json
+    archivos = [
+        f for f in glob.glob("temp_media/*")
+        if not f.lower().endswith(AUDIO_EXTS)
+        and not f.lower().endswith(('.html', '.json'))
+    ]
 
     if not archivos:
         logger("    ℹ️ Sin contenido nuevo")
@@ -168,9 +153,10 @@ for i, user in enumerate(USUARIOS, 1):
 
     for vid_id, post_files in grupos.items():
         post_files = sorted(post_files)
-        logger(f"    🔍 Archivos del grupo {vid_id}: {post_files}")
-        fotos = [f for f in post_files if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-        videos = [f for f in post_files if f.lower().endswith(('.mp4', '.webm', '.mov'))]
+        logger(f"    🔍 Archivos: {[os.path.basename(f) for f in post_files]}")
+
+        fotos  = [f for f in post_files if f.lower().endswith(FOTO_EXTS)]
+        videos = [f for f in post_files if f.lower().endswith(VIDEO_EXTS)]
 
         exito = False
 
@@ -185,8 +171,8 @@ for i, user in enumerate(USUARIOS, 1):
             logger(f"    📦 Vídeo detectado")
             exito = enviar_single("video", videos[0], caption_tg)
         else:
-            logger(f"    ⚠️ Formato desconocido, saltando")
-            exito = True  # No reintentar archivos irreconocibles
+            logger(f"    ⚠️ Formato no reconocido, saltando")
+            exito = True  # No reintentar
 
         if exito:
             logger("    ✅ Enviado con éxito")
@@ -194,7 +180,6 @@ for i, user in enumerate(USUARIOS, 1):
             logger("    ❌ Error en el envío")
             eliminar_id_de_archivo(vid_id)
 
-        # Limpiar archivos de este post independientemente del resultado
         for f in post_files:
             if os.path.exists(f):
                 try:
@@ -204,11 +189,5 @@ for i, user in enumerate(USUARIOS, 1):
 
 # Limpieza final
 limpiar_temp()
-# Eliminar archivos .html residuales que yt-dlp puede dejar con --write-pages
-for f in glob.glob("temp_media/*.html"):
-    try:
-        os.remove(f)
-    except Exception:
-        pass
 
 logger("\n--- ✨ Fin del proceso ---")
