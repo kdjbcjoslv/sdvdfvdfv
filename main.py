@@ -198,10 +198,23 @@ for i, user in enumerate(USUARIOS, 1):
     limpiar_temp()
 
     # DESCARGA 2: carruseles (playlist de imágenes)
+    # DESCARGA 2: carruseles
     logger("    ⬇️ Descargando carruseles...")
-    descargar(url_base, 'jpg/jpeg/png/webp', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s')
-    procesar_y_enviar(caption_tg)
-    limpiar_temp()
+    result = subprocess.run([
+        'yt-dlp',
+        '--no-warnings',
+        '--download-archive', 'archive.txt',
+        '--dateafter', 'now-4day',
+        '--playlist-end', '5',
+        '--impersonate', 'chrome',
+        '--no-write-playlist-metafiles',
+        '-f', 'jpg/jpeg/png/webp',
+        '-o', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s',
+        url_base
+    ], capture_output=True, text=True)
+    
+    logger(f"    STDOUT: {result.stdout[:500]}")
+    logger(f"    STDERR: {result.stderr[:500]}")
 
 # Limpieza final
 limpiar_temp()
