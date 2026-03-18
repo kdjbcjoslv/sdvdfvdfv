@@ -99,6 +99,23 @@ def limpiar_temp():
         except Exception:
             pass
 
+def descargar(url_tiktok, formato, output_template):
+    """Lanza yt-dlp con el formato y template indicados."""
+    cmd = [
+        'yt-dlp',
+        '--quiet',
+        '--no-warnings',
+        '--download-archive', 'archive.txt',
+        '--dateafter', 'now-4day',
+        '--playlist-end', '5',
+        '--impersonate', 'chrome',
+        '--no-write-playlist-metafiles',
+        '-f', formato,
+        '-o', output_template,
+        url_tiktok
+    ]
+    subprocess.run(cmd, capture_output=True)
+
 def agrupar_archivos_por_id(archivos):
     grupos = {}
     for path in archivos:
@@ -108,45 +125,15 @@ def agrupar_archivos_por_id(archivos):
         grupos.setdefault(vid_id, []).append(path)
     return grupos
 
-# --- PROCESO PRINCIPAL ---
-logger(f"--- 🛠️ INICIANDO SCAN ({len(USUARIOS)} cuentas) ---")
-if not os.path.exists("temp_media"):
-    os.makedirs("temp_media")
-
-for i, user in enumerate(USUARIOS, 1):
-    logger(f"\n👤 [Usuario #{i}] Procesando...")
-
-    limpiar_temp()
-
-    tiktok_user = user if user.startswith('@') else f'@{user}'
-    user_hashtag = limpiar_hashtag(user)
-    caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
-
-    # DESCARGA — prioriza imágenes sobre audio para carruseles
-    subprocess.run([
-        'yt-dlp',
-        '--quiet',
-        '--no-warnings',
-        '--download-archive', 'archive.txt',
-        '--dateafter', 'now-4day',
-        '--playlist-end', '5',
-        '--impersonate', 'chrome',
-        '--no-write-playlist-metafiles',
-        '-f', 'jpg/jpeg/png/webp/mp4/best',
-        '-o', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s',
-        f'https://www.tiktok.com/{tiktok_user}'
-    ], capture_output=True)
-
-    # Excluir audio, html y json
+def procesar_y_enviar(caption_tg):
+    """Agrupa y envía todo lo que haya en temp_media."""
     archivos = [
         f for f in glob.glob("temp_media/*")
         if not f.lower().endswith(AUDIO_EXTS)
         and not f.lower().endswith(('.html', '.json'))
     ]
-
     if not archivos:
-        logger("    ℹ️ Sin contenido nuevo")
-        continue
+        return 0
 
     grupos = agrupar_archivos_por_id(archivos)
     logger(f"    📂 {len(grupos)} post(s) encontrado(s)")
@@ -172,7 +159,7 @@ for i, user in enumerate(USUARIOS, 1):
             exito = enviar_single("video", videos[0], caption_tg)
         else:
             logger(f"    ⚠️ Formato no reconocido, saltando")
-            exito = True  # No reintentar
+            exito = True
 
         if exito:
             logger("    ✅ Enviado con éxito")
@@ -187,7 +174,35 @@ for i, user in enumerate(USUARIOS, 1):
                 except Exception:
                     pass
 
+    return len(grupos)
+
+# --- PROCESO PRINCIPAL ---
+logger(f"--- 🛠️ INICIANDO SCAN ({len(USUARIOS)} cuentas) ---")
+if not os.path.exists("temp_media"):
+    os.makedirs("temp_media")
+
+for i, user in enumerate(USUARIOS, 1):
+    logger(f"\n👤 [Usuario #{i}] Procesando...")
+
+    limpiar_temp()
+
+    tiktok_user = user if user.startswith('@') else f'@{user}'
+    user_hashtag = limpiar_hashtag(user)
+    caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
+    url_base = f'https://www.tiktok.com/{tiktok_user}'
+
+    # DESCARGA 1: vídeos normales
+    logger("    ⬇️ Descargando vídeos...")
+    descargar(url_base, 'mp4/bestvideo+bestaudio/best', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s')
+    procesar_y_enviar(caption_tg)
+    limpiar_temp()
+
+    # DESCARGA 2: carruseles (playlist de imágenes)
+    logger("    ⬇️ Descargando carruseles...")
+    descargar(url_base, 'jpg/jpeg/png/webp', 'temp_media/%(id)s_%(playlist_index)02d.%(ext)s')
+    procesar_y_enviar(caption_tg)
+    limpiar_temp()
+
 # Limpieza final
 limpiar_temp()
-
 logger("\n--- ✨ Fin del proceso ---")
