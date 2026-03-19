@@ -51,7 +51,11 @@ def enviar_video(path, caption):
 def crear_slideshow(video_id, audio_path):
     logger(f"   📸 Post {video_id} es un carrusel. Iniciando montaje...")
     
-    # 1. Intentar bajar imágenes
+    # 1. Definimos primero el nombre del video de salida
+    output_video = f"temp_media/{video_id}_final.mp4"
+    
+    # 2. DESCARGAR LAS IMÁGENES (Paso crucial que faltaba en tu snippet)
+    # Sin esto, la lista 'fotos' estará vacía
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings', '--skip-download',
         '--write-all-thumbnails', '--impersonate', 'chrome',
@@ -59,6 +63,7 @@ def crear_slideshow(video_id, audio_path):
         f'https://www.tiktok.com/video/{video_id}'
     ], capture_output=True)
 
+    # 3. Comprobar si realmente se han bajado fotos
     fotos = sorted(glob.glob(f"temp_media/{video_id}*"))
     fotos = [f for f in fotos if f.lower().endswith(('.jpg', '.jpeg', '.webp', '.png'))]
 
@@ -67,26 +72,26 @@ def crear_slideshow(video_id, audio_path):
         return None
 
     logger(f"   🖼️ {len(fotos)} imágenes listas. Renderizando...")
-    output_video = f"temp_media/{video_id}_final.mp4"
     
+    # 4. Ejecutar FFmpeg
     try:
-        # Unión de fotos y audio (2.5 segundos por foto)
-        # El filtro scale asegura que el vídeo sea compatible con Telegram (dimensiones pares)
+        # El comando ahora sí tiene acceso a output_video y a las fotos descargadas
         ffmpeg_cmd = [
             'ffmpeg', '-y', '-v', 'error',
-            '-framerate', '1/2.5',
+            '-framerate', '1/2.5', # 2.5 segundos por foto
             '-pattern_type', 'glob', '-i', f'temp_media/{video_id}*.[jwp][pe][ngb]*',
             '-i', audio_path,
             '-c:v', 'libx264', '-r', '30', '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', # Dimensiones pares para Telegram
             '-shortest', output_video
         ]
+        
         subprocess.run(ffmpeg_cmd, check=True)
         return output_video
+        
     except Exception as e:
         logger(f"   ❌ Error FFmpeg en el renderizado: {e}")
         return None
-
 def procesar_descarga(url_tiktok):
     logger("🚀 Escaneando actividad...")
     subprocess.run([
