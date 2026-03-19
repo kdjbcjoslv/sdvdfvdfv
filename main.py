@@ -19,7 +19,12 @@ def logger(mensaje):
     print(f"[LOG] {mensaje}", flush=True)
 
 def verificar_ffmpeg():
-    return shutil.which("ffmpeg") is not None
+    path = shutil.which("ffmpeg")
+    if path:
+        logger(f"✅ Motor de vídeo detectado.")
+        return True
+    logger("❌ ERROR: FFmpeg no encontrado en el sistema.")
+    return False
 
 def cargar_archive():
     if not os.path.exists(ARCHIVE): return set()
@@ -44,52 +49,46 @@ def enviar_video(path, caption):
     except: return False
 
 def crear_slideshow(video_id, audio_path):
-    """
-    Descarga las imágenes del post y las une al audio para crear un MP4.
-    """
-    logger(f"   📸 Post {video_id} detectado como carrusel. Creando slideshow...")
+    logger(f"   📸 Post {video_id} es un carrusel. Iniciando montaje...")
     
-    # 1. Descargar todas las imágenes (thumbnails)
+    # 1. Intentar bajar imágenes
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings', '--skip-download',
-        '--write-all-thumbnails',
+        '--write-all-thumbnails', '--impersonate', 'chrome',
         '-o', f'temp_media/{video_id}',
-        f'https://www.tiktok.com/t/{video_id}' # URL genérica o ID
+        f'https://www.tiktok.com/video/{video_id}'
     ], capture_output=True)
 
-    fotos = sorted(glob.glob(f"temp_media/{video_id}.*") + glob.glob(f"temp_media/{video_id}_*"))
+    fotos = sorted(glob.glob(f"temp_media/{video_id}*"))
     fotos = [f for f in fotos if f.lower().endswith(('.jpg', '.jpeg', '.webp', '.png'))]
 
     if not fotos:
-        logger(f"   ❌ No se pudieron obtener imágenes para {video_id}")
+        logger(f"   ❌ Fallo al obtener imágenes del carrusel {video_id}")
         return None
 
+    logger(f"   🖼️ {len(fotos)} imágenes listas. Renderizando...")
     output_video = f"temp_media/{video_id}_final.mp4"
     
-    # 2. Comando FFmpeg para unir fotos y audio
-    # Cada foto durará 2.5 segundos.
-    # Usamos un filtro complejo para reescalar todas las fotos al mismo tamaño
     try:
+        # Unión de fotos y audio (2.5 segundos por foto)
+        # El filtro scale asegura que el vídeo sea compatible con Telegram (dimensiones pares)
         ffmpeg_cmd = [
-            'ffmpeg', '-y', '-v', 'quiet',
-            '-framerate', '1/2.5', # Tiempo por foto (1 dividido segundos)
-            '-pattern_type', 'glob', '-i', f'temp_media/{video_id}*.jpg', 
+            'ffmpeg', '-y', '-v', 'error',
+            '-framerate', '1/2.5',
+            '-pattern_type', 'glob', '-i', f'temp_media/{video_id}*.[jwp][pe][ngb]*',
             '-i', audio_path,
-            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-shortest',
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', # Asegura dimensiones pares para MP4
-            output_video
+            '-c:v', 'libx264', '-r', '30', '-pix_fmt', 'yuv420p',
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+            '-shortest', output_video
         ]
-        # Si las fotos no son .jpg, ajustamos el patrón
-        if not glob.glob(f"temp_media/{video_id}*.jpg"):
-             ffmpeg_cmd[6] = f'temp_media/{video_id}*.*'
-
         subprocess.run(ffmpeg_cmd, check=True)
         return output_video
     except Exception as e:
-        logger(f"   ❌ Error en FFmpeg: {e}")
+        logger(f"   ❌ Error FFmpeg en el renderizado: {e}")
         return None
 
 def procesar_descarga(url_tiktok):
+    logger("🚀 Escaneando actividad...")
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
         '--dateafter', 'now-2day', '--playlist-end', '5',
@@ -99,53 +98,52 @@ def procesar_descarga(url_tiktok):
         url_tiktok
     ], capture_output=True)
 
-# --- PROCESO PRINCIPAL ---
-if not verificar_ffmpeg():
-    logger("❌ CRÍTICO: FFmpeg no está instalado. No podré procesar carruseles.")
-
+# --- EJECUCIÓN ---
+verificar_ffmpeg()
 limpiar_temp()
 archive_ids = cargar_archive()
 
 for i, user in enumerate(USUARIOS, 1):
-    logger(f"\n👤 [Cuenta #{i}] Procesando...")
+    logger(f"\n👤 [Cuenta #{i}/{len(USUARIOS)}] Iniciando...")
     tiktok_user = user if user.startswith('@') else f'@{user}'
     user_hashtag = re.sub(r'[^a-zA-Z0-9_]', '_', user.lstrip('@'))
     caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
     
     procesar_descarga(f'https://www.tiktok.com/{tiktok_user}')
 
-    # Analizar qué ha bajado
     ficheros = glob.glob("temp_media/*")
-    
-    # Agrupar por ID
+    # Agrupamos por ID para saber qué tenemos de cada post
     ids_en_temp = set(os.path.basename(f).split('.')[0].split('_')[0] for f in ficheros)
 
+    enviados_cuenta = 0
     for vid_id in ids_en_temp:
         if vid_id in archive_ids:
-            # Borrar basura de IDs viejos
             for f in glob.glob(f"temp_media/{vid_id}*"): os.remove(f)
             continue
 
         video_final = None
-        
-        # Caso A: Se bajó el MP4 directamente
-        mp4_path = f"temp_media/{vid_id}.mp4"
-        if os.path.exists(mp4_path):
-            video_final = mp4_path
-        
-        # Caso B: Solo se bajó audio (Carrusel)
-        elif os.path.exists(f"temp_media/{vid_id}.m4a"):
-            video_final = crear_slideshow(vid_id, f"temp_media/{vid_id}.m4a")
+        path_mp4 = f"temp_media/{vid_id}.mp4"
+        path_m4a = f"temp_media/{vid_id}.m4a"
+
+        # Prioridad 1: Vídeo real
+        if os.path.exists(path_mp4):
+            video_final = path_mp4
+        # Prioridad 2: Carrusel (Audio solo)
+        elif os.path.exists(path_m4a):
+            video_final = crear_slideshow(vid_id, path_m4a)
 
         if video_final and os.path.exists(video_final):
-            logger(f"   📤 Enviando {vid_id}...")
+            logger(f"   📦 Enviando fichero ({os.path.getsize(video_final)//1024} KB)...")
             if enviar_video(video_final, caption_tg):
                 guardar_en_archive(vid_id)
-                logger(f"   ✅ Éxito")
+                enviados_cuenta += 1
+                logger(f"   ✅ Post {vid_id} enviado.")
             
-        # Limpiar todo lo relacionado con este ID
+        # Limpieza por cada post procesado
         for f in glob.glob(f"temp_media/{vid_id}*"):
             try: os.remove(f)
             except: pass
 
-logger("\n--- ✨ Fin del proceso ---")
+    logger(f"📊 Resumen: {enviados_cuenta} nuevos.")
+
+logger("\n--- ✨ Proceso completado ---")
