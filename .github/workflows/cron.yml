@@ -14,10 +14,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar herramientas
-        run: |
-          sudo apt-get install -y ffmpeg
-          pip install yt-dlp requests curl-cffi
+      # --- LA SOLUCIÓN RÁPIDA Y SIN ERRORES ---
+      - name: Instalar FFmpeg (Binario directo)
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        with:
+          ffmpeg-version: 'release'
+
+      - name: Instalar herramientas Python
+        run: pip install yt-dlp requests curl-cffi
 
       - name: Abrir historial cifrado
         env:
