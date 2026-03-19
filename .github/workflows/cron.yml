@@ -15,9 +15,11 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar herramientas
-        run: pip install yt-dlp requests curl-cffi
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install yt-dlp requests curl-cffi
 
-      # --- AQUÍ VA EL DESCIFRADO (Antes del script) ---
       - name: Abrir historial cifrado
         env:
           GPG_KEY: ${{ secrets.GPG_PASSPHRASE }}
@@ -35,7 +37,6 @@ jobs:
           LISTA_USUARIOS: ${{ secrets.LISTA_USUARIOS }}
         run: python main.py
 
-      # --- AQUÍ VA EL CIFRADO (Después del script) ---
       - name: Cerrar caja fuerte y cifrar
         env:
           GPG_KEY: ${{ secrets.GPG_PASSPHRASE }}
@@ -47,15 +48,7 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
-          # 1. Añadimos el archivo CIFRADO (.gpg), que es el que realmente existe ahora
           git add archive.txt.gpg
-          
-          # 2. Hacemos el commit
           git commit -m "Historial actualizado (Cifrado)" || exit 0
-          
-          # 3. Traer cambios de la nube para evitar el error de antes
           git pull --rebase origin main
-          
-          # 4. Subir los cambios
           git push
