@@ -52,49 +52,60 @@ def crear_slideshow(video_id, audio_path):
     logger(f"   📸 Post {video_id} es un carrusel. Iniciando montaje...")
     
     output_video = f"temp_media/{video_id}_final.mp4"
+    img_dir = f"temp_media/img_{video_id}"
+    os.makedirs(img_dir, exist_ok=True)
     
-    # 1. DESCARGA DE IMÁGENES
-    # Cambiamos el output template para que use índices: ID_01, ID_02, etc.
-    # Quitamos --skip-download y usamos -f "bestaudio" para que no baje el video pero sí las fotos
+    # 1. DESCARGA AGRESIVA DE IMÁGENES
+    # Usamos parámetros de la API móvil que suelen exponer mejor las fotos
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
-        '--write-all-thumbnails', 
+        '--write-all-thumbnails', '--skip-download',
         '--impersonate', 'chrome',
-        '-f', 'bestaudio', # Engañamos a yt-dlp para que crea que solo queremos audio y baje las fotos
-        '-o', f'temp_media/{video_id}_%(playlist_index)s.%(ext)s',
+        '--extractor-args', 'tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com;app_name=com.ss.android.ugc.trill',
+        '-o', f'{img_dir}/%(id)s_%(thumbnail_id)s.%(ext)s',
         f'https://www.tiktok.com/video/{video_id}'
     ], capture_output=True)
 
-    # 2. BÚSQUEDA AGRESIVA DE IMÁGENES
-    # Buscamos cualquier cosa que empiece por el ID y sea imagen
-    patrones = [
-        f"temp_media/{video_id}*.[jJ][pP][gG]",
-        f"temp_media/{video_id}*.[jJ][pP][eE][gG]",
-        f"temp_media/{video_id}*.[wW][eE][bB][pP]",
-        f"temp_media/{video_id}*.[pP][nN][gG]"
-    ]
-    
+    # 2. BÚSQUEDA DE IMÁGENES EN EL SUBDIRECTORIO
     fotos = []
-    for p in patrones:
-        fotos.extend(glob.glob(p))
+    for ext in ('*.jpg', '*.jpeg', '*.webp', '*.png', '*.JPG', '*.PNG'):
+        fotos.extend(glob.glob(os.path.join(img_dir, ext)))
     
-    fotos = sorted(list(set(fotos))) # Eliminamos duplicados y ordenamos
+    fotos = sorted(list(set(fotos)))
 
     if not fotos:
-        # Debug extra si falla
-        logger(f"   ❌ No hay fotos. Contenido de temp: {os.listdir('temp_media')[:5]}")
+        # Segundo intento: si falla, probamos a bajar el "formato" de la foto
+        logger(f"   ⚠️ Intento 1 fallido, probando método alternativo para {video_id}...")
+        subprocess.run([
+            'yt-dlp', '--quiet', '--no-warnings',
+            '--write-all-thumbnails', '--skip-download',
+            '-o', f'{img_dir}/%(id)s_alt_%(thumbnail_id)s.%(ext)s',
+            f'https://www.tiktok.com/video/{video_id}'
+        ], capture_output=True)
+        fotos = sorted(glob.glob(os.path.join(img_dir, "*.*")))
+        fotos = [f for f in fotos if f.lower().endswith(('.jpg', '.jpeg', '.webp', '.png'))]
+
+    if not fotos:
+        logger(f"   ❌ No se encontraron fotos en {img_dir}. Contenido: {os.listdir(img_dir)}")
+        shutil.rmtree(img_dir, ignore_errors=True)
         return None
 
-    logger(f"   🖼️ {len(fotos)} imágenes detectadas. Renderizando con FFmpeg...")
+    logger(f"   🖼️ {len(fotos)} imágenes obtenidas. Renderizando...")
     
-    # 3. RENDERIZADO
+    # 3. RENDERIZADO CON FFMPEG
     try:
-        # Usamos un filtro más sencillo para que FFmpeg no se líe con los nombres
-        # Creamos un archivo temporal de texto para FFmpeg (método concat) o usamos el glob
+        # Usamos un archivo temporal para que FFmpeg no falle con caracteres extraños
+        list_file = f"temp_media/list_{video_id}.txt"
+        with open(list_file, 'w') as f:
+            for foto in fotos:
+                # Cada foto aparecerá por 2.5 segundos
+                f.write(f"file '{os.path.abspath(foto)}'\nduration 2.5\n")
+            # El último archivo necesita repetirse para que el duration funcione
+            f.write(f"file '{os.path.abspath(fotos[-1])}'\n")
+
         ffmpeg_cmd = [
             'ffmpeg', '-y', '-v', 'error',
-            '-framerate', '1/2.5',
-            '-pattern_type', 'glob', '-i', f'temp_media/{video_id}*.[jJpP][pPeE][gG]?[pPnN]*',
+            '-f', 'concat', '-safe', '0', '-i', list_file,
             '-i', audio_path,
             '-c:v', 'libx264', '-r', '30', '-pix_fmt', 'yuv420p',
             '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
@@ -102,10 +113,13 @@ def crear_slideshow(video_id, audio_path):
         ]
         
         subprocess.run(ffmpeg_cmd, check=True)
+        os.remove(list_file)
+        shutil.rmtree(img_dir, ignore_errors=True)
         return output_video
         
     except Exception as e:
         logger(f"   ❌ Error FFmpeg: {e}")
+        shutil.rmtree(img_dir, ignore_errors=True)
         return None
 
 def procesar_descarga(url_tiktok):
