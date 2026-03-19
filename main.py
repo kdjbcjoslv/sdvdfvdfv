@@ -51,38 +51,53 @@ def enviar_video(path, caption):
 def crear_slideshow(video_id, audio_path):
     logger(f"   📸 Post {video_id} es un carrusel. Iniciando montaje...")
     
-    # 1. Definimos primero el nombre del video de salida
     output_video = f"temp_media/{video_id}_final.mp4"
     
-    # 2. DESCARGAR LAS IMÁGENES (Paso crucial que faltaba en tu snippet)
-    # Sin esto, la lista 'fotos' estará vacía
+    # 1. DESCARGA DE IMÁGENES
+    # Cambiamos el output template para que use índices: ID_01, ID_02, etc.
+    # Quitamos --skip-download y usamos -f "bestaudio" para que no baje el video pero sí las fotos
     subprocess.run([
-        'yt-dlp', '--quiet', '--no-warnings', '--skip-download',
-        '--write-all-thumbnails', '--impersonate', 'chrome',
-        '-o', f'temp_media/{video_id}',
+        'yt-dlp', '--quiet', '--no-warnings',
+        '--write-all-thumbnails', 
+        '--impersonate', 'chrome',
+        '-f', 'bestaudio', # Engañamos a yt-dlp para que crea que solo queremos audio y baje las fotos
+        '-o', f'temp_media/{video_id}_%(playlist_index)s.%(ext)s',
         f'https://www.tiktok.com/video/{video_id}'
     ], capture_output=True)
 
-    # 3. Comprobar si realmente se han bajado fotos
-    fotos = sorted(glob.glob(f"temp_media/{video_id}*"))
-    fotos = [f for f in fotos if f.lower().endswith(('.jpg', '.jpeg', '.webp', '.png'))]
+    # 2. BÚSQUEDA AGRESIVA DE IMÁGENES
+    # Buscamos cualquier cosa que empiece por el ID y sea imagen
+    patrones = [
+        f"temp_media/{video_id}*.[jJ][pP][gG]",
+        f"temp_media/{video_id}*.[jJ][pP][eE][gG]",
+        f"temp_media/{video_id}*.[wW][eE][bB][pP]",
+        f"temp_media/{video_id}*.[pP][nN][gG]"
+    ]
+    
+    fotos = []
+    for p in patrones:
+        fotos.extend(glob.glob(p))
+    
+    fotos = sorted(list(set(fotos))) # Eliminamos duplicados y ordenamos
 
     if not fotos:
-        logger(f"   ❌ Fallo al obtener imágenes del carrusel {video_id}")
+        # Debug extra si falla
+        logger(f"   ❌ No hay fotos. Contenido de temp: {os.listdir('temp_media')[:5]}")
         return None
 
-    logger(f"   🖼️ {len(fotos)} imágenes listas. Renderizando...")
+    logger(f"   🖼️ {len(fotos)} imágenes detectadas. Renderizando con FFmpeg...")
     
-    # 4. Ejecutar FFmpeg
+    # 3. RENDERIZADO
     try:
-        # El comando ahora sí tiene acceso a output_video y a las fotos descargadas
+        # Usamos un filtro más sencillo para que FFmpeg no se líe con los nombres
+        # Creamos un archivo temporal de texto para FFmpeg (método concat) o usamos el glob
         ffmpeg_cmd = [
             'ffmpeg', '-y', '-v', 'error',
-            '-framerate', '1/2.5', # 2.5 segundos por foto
-            '-pattern_type', 'glob', '-i', f'temp_media/{video_id}*.[jwp][pe][ngb]*',
+            '-framerate', '1/2.5',
+            '-pattern_type', 'glob', '-i', f'temp_media/{video_id}*.[jJpP][pPeE][gG]?[pPnN]*',
             '-i', audio_path,
             '-c:v', 'libx264', '-r', '30', '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', # Dimensiones pares para Telegram
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
             '-shortest', output_video
         ]
         
@@ -90,8 +105,9 @@ def crear_slideshow(video_id, audio_path):
         return output_video
         
     except Exception as e:
-        logger(f"   ❌ Error FFmpeg en el renderizado: {e}")
+        logger(f"   ❌ Error FFmpeg: {e}")
         return None
+
 def procesar_descarga(url_tiktok):
     logger("🚀 Escaneando actividad...")
     subprocess.run([
