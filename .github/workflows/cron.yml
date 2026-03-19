@@ -16,7 +16,6 @@ jobs:
 
       - name: Instalar herramientas
         run: |
-          sudo apt-get update
           sudo apt-get install -y ffmpeg
           pip install yt-dlp requests curl-cffi
 
