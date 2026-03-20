@@ -45,28 +45,61 @@ def limpiar_temp():
         except:
             pass
 
+def telegram_post(url, data, files=None, max_reintentos=5):
+    """
+    Wrapper para llamadas a la API de Telegram.
+    Gestiona automáticamente el error 429 (Too Many Requests)
+    esperando el tiempo que indica retry_after antes de reintentar.
+    """
+    for intento in range(max_reintentos):
+        try:
+            if files:
+                r = requests.post(url, data=data, files=files)
+            else:
+                r = requests.post(url, data=data)
+
+            if r.status_code == 200:
+                return r
+
+            if r.status_code == 429:
+                try:
+                    retry_after = r.json().get('parameters', {}).get('retry_after', 10)
+                except:
+                    retry_after = 10
+                logger(f"   ⏳ Rate limit Telegram. Esperando {retry_after}s...")
+                time.sleep(retry_after + 1)
+                continue
+
+            # Otro error no recuperable
+            logger(f"   ❌ Error Telegram {r.status_code}: {r.text[:200]}")
+            return None
+
+        except Exception as e:
+            logger(f"   ❌ Excepción en llamada a Telegram.")
+            return None
+
+    logger(f"   ❌ Máximo de reintentos alcanzado.")
+    return None
+
 def enviar_video(path, caption):
     url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
     try:
         with open(path, 'rb') as f:
-            r = requests.post(
+            r = telegram_post(
                 url,
                 data={'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'},
                 files={'video': f}
             )
-            return r.status_code == 200
+            return r is not None
     except:
         return False
 
 def enviar_album_fotos(fotos, caption):
     """
-    Envía una lista de fotos como álbum de Telegram (sendMediaGroup).
-    Divide en paquetes de máximo 10. El caption solo va en la primera foto.
-    Devuelve True si todos los paquetes se enviaron bien.
+    Envía fotos como álbum(es) de Telegram (sendMediaGroup).
+    Divide en paquetes de máximo 10. Respeta rate limits automáticamente.
     """
     url = f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup"
-
-    # Dividir en paquetes de 10
     paquetes = [fotos[i:i+10] for i in range(0, len(fotos), 10)]
     total_paquetes = len(paquetes)
 
@@ -78,7 +111,6 @@ def enviar_album_fotos(fotos, caption):
 
         for idx, foto_path in enumerate(paquete):
             file_key = f"photo_{idx}"
-            # Solo el primer foto del primer paquete lleva caption
             if idx == 0 and idx_paquete == 0:
                 media.append({
                     "type": "photo",
@@ -94,16 +126,13 @@ def enviar_album_fotos(fotos, caption):
             files[file_key] = open(foto_path, 'rb')
 
         try:
-            r = requests.post(
+            r = telegram_post(
                 url,
                 data={'chat_id': CHAT_ID, 'media': json.dumps(media)},
                 files=files
             )
-            ok = r.status_code == 200
-            if not ok:
-                logger(f"   ❌ Error enviando álbum: {r.text[:200]}")
-        except Exception as e:
-            logger(f"   ❌ Excepción enviando álbum.")
+            ok = r is not None
+        except:
             ok = False
         finally:
             for f in files.values():
@@ -112,9 +141,9 @@ def enviar_album_fotos(fotos, caption):
         if not ok:
             return False
 
-        # Pequeña pausa entre paquetes para no saturar la API
+        # Pausa entre paquetes para no provocar otro rate limit
         if idx_paquete < total_paquetes - 1:
-            time.sleep(1)
+            time.sleep(2)
 
     return True
 
@@ -164,7 +193,6 @@ def descargar_video_directo(video_id, post_url):
     return None
 
 def descargar_imagenes_gallerydl(img_dir, post_url):
-    """Intenta descargar imágenes con gallery-dl, con un reintento."""
     for intento in range(1, 3):
         if intento > 1:
             logger(f"   🔄 Reintento {intento} con gallery-dl (espera {DELAY_REINTENTO}s)...")
@@ -186,7 +214,6 @@ def descargar_imagenes_gallerydl(img_dir, post_url):
     return []
 
 def descargar_imagenes_ytdlp(img_dir, post_url):
-    """Fallback: extrae URLs del JSON de yt-dlp y descarga con requests."""
     logger(f"   🔄 Fallback: extrayendo imágenes desde yt-dlp JSON...")
     result = subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
@@ -236,16 +263,11 @@ def descargar_imagenes_ytdlp(img_dir, post_url):
         return []
 
 def procesar_carrusel(video_id, post_url, caption):
-    """
-    Descarga las imágenes del carrusel y las envía como álbum(es) de Telegram.
-    No genera ningún vídeo — es mucho más rápido.
-    """
     logger(f"   📸 Procesando carrusel como álbum de fotos...")
 
     img_dir = f"temp_media/img_{video_id}"
     os.makedirs(img_dir, exist_ok=True)
 
-    # Intentar gallery-dl primero, luego fallback yt-dlp
     logger(f"   📥 Descargando imágenes...")
     fotos = descargar_imagenes_gallerydl(img_dir, post_url)
     if not fotos:
@@ -276,7 +298,7 @@ def descargar_videos_bulk(tiktok_url):
     logger("🚀 Descargando contenido reciente...")
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
-        '--dateafter', 'now-2day', '--playlist-end', '5',
+        '--dateafter', 'now-6day', '--playlist-end', '20',
         '--impersonate', 'chrome',
         '-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4',
         '-o', 'temp_media/%(id)s.%(ext)s',
@@ -323,7 +345,6 @@ for i, user in enumerate(USUARIOS, 1):
         path_mp4 = f"temp_media/{vid_id}.mp4"
 
         if os.path.exists(path_mp4) and tiene_stream_video(path_mp4):
-            # Vídeo normal
             logger(f"   🎥 Post detectado como vídeo.")
             if enviar_video(path_mp4, caption_tg):
                 enviado = True
@@ -350,7 +371,6 @@ for i, user in enumerate(USUARIOS, 1):
                     logger(f"   ❌ No se pudo descargar/enviar el vídeo.")
 
             else:
-                # Tipo desconocido: intentar vídeo, luego carrusel
                 logger(f"   ❓ Tipo desconocido. Intentando como vídeo...")
                 path = descargar_video_directo(vid_id, post_url)
                 if path and enviar_video(path, caption_tg):
