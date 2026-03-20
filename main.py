@@ -45,61 +45,83 @@ def limpiar_temp():
         except:
             pass
 
-def telegram_post(url, data, files=None, max_reintentos=5):
-    """
-    Wrapper para llamadas a la API de Telegram.
-    Gestiona automáticamente el error 429 (Too Many Requests)
-    esperando el tiempo que indica retry_after antes de reintentar.
-    """
+def enviar_video(path, caption):
+    """Envía un vídeo a Telegram con reintentos automáticos ante rate limit."""
+    url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
+    max_reintentos = 5
+
     for intento in range(max_reintentos):
         try:
-            if files:
-                r = requests.post(url, data=data, files=files)
-            else:
-                r = requests.post(url, data=data)
+            with open(path, 'rb') as f:
+                r = requests.post(
+                    url,
+                    data={'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'},
+                    files={'video': f}
+                )
 
             if r.status_code == 200:
-                return r
+                return True
 
             if r.status_code == 429:
-                try:
-                    retry_after = r.json().get('parameters', {}).get('retry_after', 10)
-                except:
-                    retry_after = 10
+                retry_after = r.json().get('parameters', {}).get('retry_after', 10)
                 logger(f"   ⏳ Rate limit Telegram. Esperando {retry_after}s...")
                 time.sleep(retry_after + 1)
                 continue
 
-            # Otro error no recuperable
             logger(f"   ❌ Error Telegram {r.status_code}: {r.text[:200]}")
-            return None
+            return False
 
-        except Exception as e:
-            logger(f"   ❌ Excepción en llamada a Telegram.")
-            return None
+        except Exception:
+            logger(f"   ❌ Excepción enviando vídeo.")
+            return False
 
     logger(f"   ❌ Máximo de reintentos alcanzado.")
-    return None
+    return False
 
-def enviar_video(path, caption):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
-    try:
-        with open(path, 'rb') as f:
-            r = telegram_post(
+def enviar_paquete_fotos(paquete_paths, media_json, max_reintentos=5):
+    """
+    Envía un único paquete (lista de rutas) como mediaGroup.
+    Reabre los ficheros en cada reintento para evitar el error 'file must be non-empty'.
+    """
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup"
+
+    for intento in range(max_reintentos):
+        # Abrir ficheros frescos en cada intento
+        files = {f"photo_{idx}": open(path, 'rb') for idx, path in enumerate(paquete_paths)}
+        try:
+            r = requests.post(
                 url,
-                data={'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'},
-                files={'video': f}
+                data={'chat_id': CHAT_ID, 'media': media_json},
+                files=files
             )
-            return r is not None
-    except:
-        return False
+
+            if r.status_code == 200:
+                return True
+
+            if r.status_code == 429:
+                retry_after = r.json().get('parameters', {}).get('retry_after', 10)
+                logger(f"   ⏳ Rate limit Telegram. Esperando {retry_after}s...")
+                time.sleep(retry_after + 1)
+                continue
+
+            logger(f"   ❌ Error Telegram {r.status_code}: {r.text[:200]}")
+            return False
+
+        except Exception:
+            logger(f"   ❌ Excepción enviando álbum.")
+            return False
+        finally:
+            for f in files.values():
+                f.close()
+
+    logger(f"   ❌ Máximo de reintentos alcanzado.")
+    return False
 
 def enviar_album_fotos(fotos, caption):
     """
-    Envía fotos como álbum(es) de Telegram (sendMediaGroup).
-    Divide en paquetes de máximo 10. Respeta rate limits automáticamente.
+    Divide las fotos en paquetes de 10 y los envía como álbumes de Telegram.
+    El caption solo va en la primera foto del primer paquete.
     """
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup"
     paquetes = [fotos[i:i+10] for i in range(0, len(fotos), 10)]
     total_paquetes = len(paquetes)
 
@@ -107,8 +129,6 @@ def enviar_album_fotos(fotos, caption):
         logger(f"   📤 Enviando álbum {idx_paquete+1}/{total_paquetes} ({len(paquete)} fotos)...")
 
         media = []
-        files = {}
-
         for idx, foto_path in enumerate(paquete):
             file_key = f"photo_{idx}"
             if idx == 0 and idx_paquete == 0:
@@ -123,25 +143,11 @@ def enviar_album_fotos(fotos, caption):
                     "type": "photo",
                     "media": f"attach://{file_key}"
                 })
-            files[file_key] = open(foto_path, 'rb')
 
-        try:
-            r = telegram_post(
-                url,
-                data={'chat_id': CHAT_ID, 'media': json.dumps(media)},
-                files=files
-            )
-            ok = r is not None
-        except:
-            ok = False
-        finally:
-            for f in files.values():
-                f.close()
-
+        ok = enviar_paquete_fotos(paquete, json.dumps(media))
         if not ok:
             return False
 
-        # Pausa entre paquetes para no provocar otro rate limit
         if idx_paquete < total_paquetes - 1:
             time.sleep(2)
 
@@ -287,7 +293,7 @@ def procesar_carrusel(video_id, post_url, caption):
 def obtener_ids_recientes(tiktok_url):
     result = subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
-        '--dateafter', 'now-6day', '--playlist-end', '20',
+        '--dateafter', 'now-2day', '--playlist-end', '5',
         '--impersonate', 'chrome',
         '--skip-download', '--print', '%(id)s',
         tiktok_url
@@ -298,7 +304,7 @@ def descargar_videos_bulk(tiktok_url):
     logger("🚀 Descargando contenido reciente...")
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
-        '--dateafter', 'now-6day', '--playlist-end', '20',
+        '--dateafter', 'now-2day', '--playlist-end', '5',
         '--impersonate', 'chrome',
         '-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4',
         '-o', 'temp_media/%(id)s.%(ext)s',
