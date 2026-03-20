@@ -21,7 +21,7 @@ jobs:
           ffmpeg-version: 'release'
 
       - name: Instalar herramientas Python
-        run: pip install yt-dlp requests curl-cffi
+        run: pip install yt-dlp requests curl-cffi gallery-dl
 
       - name: Abrir historial cifrado
         env:
