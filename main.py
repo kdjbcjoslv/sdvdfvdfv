@@ -197,7 +197,7 @@ def obtener_ids_recientes(tiktok_url):
     """
     result = subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
-        '--dateafter', 'now-4day', '--playlist-end', '20',
+        '--dateafter', 'now-6day', '--playlist-end', '20',
         '--impersonate', 'chrome',
         '--skip-download',
         '--print', '%(id)s',
