@@ -71,8 +71,59 @@ def tiene_stream_video(path):
 def descargar_info_post(video_id):
     """
     Obtiene el JSON completo del post via yt-dlp.
-    Devuelve (image_urls, es_carrusel).
+    Prueba varias formas de URL por si una falla.
     """
+    urls_a_probar = [
+        f'https://www.tiktok.com/video/{video_id}',
+        f'https://vm.tiktok.com/{video_id}',
+        f'https://www.tiktok.com/@_/video/{video_id}',
+    ]
+
+    for url in urls_a_probar:
+        result = subprocess.run([
+            'yt-dlp', '--quiet', '--no-warnings',
+            '--dump-json',
+            '--impersonate', 'chrome',
+            url
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0 or not result.stdout.strip():
+            continue
+
+        try:
+            info = json.loads(result.stdout)
+
+            # yt-dlp puede usar distintos nombres según la versión
+            images = (
+                info.get('images') or
+                info.get('image_urls') or
+                info.get('thumbnails_carousel') or
+                []
+            )
+
+            image_urls = []
+            for img in images:
+                if isinstance(img, dict):
+                    url_img = (
+                        img.get('url') or
+                        img.get('thumbnail') or
+                        img.get('original_url') or
+                        ""
+                    )
+                    if url_img:
+                        image_urls.append(url_img)
+                elif isinstance(img, str):
+                    image_urls.append(img)
+
+            if image_urls:
+                logger(f"   ✅ JSON OK: {len(image_urls)} imágenes encontradas.")
+                return image_urls, True
+
+        except json.JSONDecodeError:
+            continue
+
+    # Debug: volcar campos del JSON para diagnóstico
+    logger(f"   🔍 Analizando estructura JSON del post...")
     result = subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
         '--dump-json',
@@ -80,29 +131,24 @@ def descargar_info_post(video_id):
         f'https://www.tiktok.com/video/{video_id}'
     ], capture_output=True, text=True)
 
-    if result.returncode != 0 or not result.stdout.strip():
-        return [], False
+    if result.stdout.strip():
+        try:
+            info = json.loads(result.stdout)
+            # Filtrar campos que puedan contener nombres/URLs de usuario
+            campos_seguros = [
+                k for k in info.keys()
+                if not any(x in k.lower() for x in ['uploader', 'channel', 'creator', 'author', 'url', 'webpage'])
+            ]
+            logger(f"   🔑 Campos disponibles: {campos_seguros}")
+        except:
+            logger(f"   ❌ JSON inválido recibido.")
+    else:
+        logger(f"   ❌ yt-dlp no devolvió datos.")
 
-    try:
-        info = json.loads(result.stdout)
-        # yt-dlp expone las fotos del carrusel en el campo 'images'
-        images = info.get('images') or []
-        # Extraer la URL de cada imagen
-        image_urls = []
-        for img in images:
-            if isinstance(img, dict):
-                url = img.get('url') or img.get('thumbnail') or ""
-                if url:
-                    image_urls.append(url)
-            elif isinstance(img, str):
-                image_urls.append(img)
-        es_carrusel = len(image_urls) > 0
-        return image_urls, es_carrusel
-    except json.JSONDecodeError:
-        return [], False
+    return [], False
 
 def crear_slideshow(video_id):
-    logger(f"   📸 Post {video_id} es un carrusel. Iniciando montaje...")
+    logger(f"   📸 Carrusel detectado. Iniciando montaje...")
 
     output_video = f"temp_media/{video_id}_final.mp4"
     img_dir = f"temp_media/img_{video_id}"
@@ -112,7 +158,7 @@ def crear_slideshow(video_id):
     image_urls, es_carrusel = descargar_info_post(video_id)
 
     if not image_urls:
-        logger(f"   ❌ No se encontraron imágenes en el JSON del post {video_id}.")
+        logger(f"   ❌ No se encontraron imágenes en el JSON del post.")
         shutil.rmtree(img_dir, ignore_errors=True)
         return None
 
@@ -130,10 +176,10 @@ def crear_slideshow(video_id):
                     f.write(r.content)
                 fotos.append(dest)
         except Exception as e:
-            logger(f"   ⚠️ Error descargando imagen {idx}: {e}")
+            logger(f"   ⚠️ Error descargando imagen {idx}.")
 
     if not fotos:
-        logger(f"   ❌ No se pudieron descargar las imágenes del carrusel {video_id}.")
+        logger(f"   ❌ No se pudieron descargar las imágenes del carrusel.")
         shutil.rmtree(img_dir, ignore_errors=True)
         return None
 
@@ -141,7 +187,7 @@ def crear_slideshow(video_id):
 
     # 3. Descargar el audio por separado
     audio_path = f"temp_media/{video_id}_audio.m4a"
-    audio_result = subprocess.run([
+    subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
         '-f', 'bestaudio',
         '--impersonate', 'chrome',
@@ -151,7 +197,7 @@ def crear_slideshow(video_id):
 
     tiene_audio = os.path.exists(audio_path)
     if not tiene_audio:
-        logger("   ⚠️ No se pudo descargar el audio. El vídeo se creará sin sonido.")
+        logger("   ⚠️ Audio no disponible. El vídeo se creará sin sonido.")
 
     # 4. Renderizar con FFmpeg
     logger(f"   🎬 Renderizando slideshow...")
@@ -191,11 +237,11 @@ def crear_slideshow(video_id):
         return output_video
 
     except Exception as e:
-        logger(f"   ❌ Error FFmpeg al renderizar slideshow: {e}")
+        logger(f"   ❌ Error FFmpeg al renderizar slideshow.")
         shutil.rmtree(img_dir, ignore_errors=True)
         return None
 
-def procesar_descarga(url_tiktok):
+def procesar_descarga(tiktok_url):
     logger("🚀 Escaneando actividad reciente...")
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
@@ -203,7 +249,7 @@ def procesar_descarga(url_tiktok):
         '--impersonate', 'chrome',
         '-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4',
         '-o', 'temp_media/%(id)s.%(ext)s',
-        url_tiktok
+        tiktok_url
     ], capture_output=True)
 
 # --- EJECUCIÓN ---
@@ -212,7 +258,7 @@ limpiar_temp()
 archive_ids = cargar_archive()
 
 for i, user in enumerate(USUARIOS, 1):
-    logger(f"\n👤 [Cuenta #{i}/{len(USUARIOS)}] Procesando {user}...")
+    logger(f"\n👤 [Cuenta #{i}/{len(USUARIOS)}]")
     tiktok_user = user if user.startswith('@') else f'@{user}'
     user_hashtag = re.sub(r'[^a-zA-Z0-9_]', '_', user.lstrip('@'))
     caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
@@ -229,7 +275,7 @@ for i, user in enumerate(USUARIOS, 1):
     enviados_cuenta = 0
     for vid_id in ids_en_temp:
         if vid_id in archive_ids:
-            logger(f"   ⏭️ Post {vid_id} ya en archive, saltando.")
+            logger(f"   ⏭️ Post ya archivado, saltando.")
             for f in glob.glob(f"temp_media/{vid_id}*"):
                 try:
                     os.remove(f)
@@ -242,17 +288,14 @@ for i, user in enumerate(USUARIOS, 1):
 
         if os.path.exists(path_mp4):
             if tiene_stream_video(path_mp4):
-                # Es un vídeo real
-                logger(f"   🎥 Post {vid_id} detectado como vídeo.")
+                logger(f"   🎥 Post detectado como vídeo.")
                 video_final = path_mp4
             else:
-                # El mp4 descargado no tiene vídeo → es audio de carrusel
-                logger(f"   🖼️ Post {vid_id} detectado como carrusel (mp4 sin stream de vídeo).")
+                logger(f"   🖼️ Post detectado como carrusel (mp4 sin stream de vídeo).")
                 os.remove(path_mp4)
                 video_final = crear_slideshow(vid_id)
         else:
-            # No hay mp4 → intentar como carrusel directamente
-            logger(f"   🖼️ Post {vid_id} sin mp4, intentando como carrusel.")
+            logger(f"   🖼️ Sin mp4, intentando como carrusel.")
             video_final = crear_slideshow(vid_id)
 
         if video_final and os.path.exists(video_final):
@@ -261,11 +304,11 @@ for i, user in enumerate(USUARIOS, 1):
                 guardar_en_archive(vid_id)
                 archive_ids.add(vid_id)
                 enviados_cuenta += 1
-                logger(f"   ✅ Post {vid_id} enviado y archivado.")
+                logger(f"   ✅ Post enviado y archivado.")
             else:
-                logger(f"   ❌ Fallo al enviar {vid_id} a Telegram.")
+                logger(f"   ❌ Fallo al enviar a Telegram.")
         else:
-            logger(f"   ⚠️ No se pudo procesar el post {vid_id}.")
+            logger(f"   ⚠️ No se pudo procesar el post.")
 
         # Limpieza de cualquier residuo de este post
         for f in glob.glob(f"temp_media/{vid_id}*"):
@@ -274,6 +317,6 @@ for i, user in enumerate(USUARIOS, 1):
             except:
                 pass
 
-    logger(f"📊 Resumen cuenta {user}: {enviados_cuenta} nuevos enviados.")
+    logger(f"📊 Resumen: {enviados_cuenta} nuevos enviados.")
 
 logger("\n--- ✨ Proceso completado ---")
