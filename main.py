@@ -5,6 +5,7 @@ import requests
 import glob
 import re
 import shutil
+import time
 
 # --- CONFIGURACIÓN ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -13,7 +14,7 @@ USUARIOS_RAW = os.getenv("LISTA_USUARIOS", "")
 USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.strip()]
 
 ARCHIVE = "archive.txt"
-DURACION_POR_FOTO = 3.5  # segundos mínimos por imagen en slideshow
+DELAY_REINTENTO = 8  # segundos entre reintentos de gallery-dl
 
 def logger(mensaje):
     print(f"[LOG] {mensaje}", flush=True)
@@ -57,6 +58,66 @@ def enviar_video(path, caption):
     except:
         return False
 
+def enviar_album_fotos(fotos, caption):
+    """
+    Envía una lista de fotos como álbum de Telegram (sendMediaGroup).
+    Divide en paquetes de máximo 10. El caption solo va en la primera foto.
+    Devuelve True si todos los paquetes se enviaron bien.
+    """
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMediaGroup"
+
+    # Dividir en paquetes de 10
+    paquetes = [fotos[i:i+10] for i in range(0, len(fotos), 10)]
+    total_paquetes = len(paquetes)
+
+    for idx_paquete, paquete in enumerate(paquetes):
+        logger(f"   📤 Enviando álbum {idx_paquete+1}/{total_paquetes} ({len(paquete)} fotos)...")
+
+        media = []
+        files = {}
+
+        for idx, foto_path in enumerate(paquete):
+            file_key = f"photo_{idx}"
+            # Solo el primer foto del primer paquete lleva caption
+            if idx == 0 and idx_paquete == 0:
+                media.append({
+                    "type": "photo",
+                    "media": f"attach://{file_key}",
+                    "caption": caption,
+                    "parse_mode": "HTML"
+                })
+            else:
+                media.append({
+                    "type": "photo",
+                    "media": f"attach://{file_key}"
+                })
+            files[file_key] = open(foto_path, 'rb')
+
+        try:
+            r = requests.post(
+                url,
+                data={'chat_id': CHAT_ID, 'media': json.dumps(media)},
+                files=files
+            )
+            ok = r.status_code == 200
+            if not ok:
+                logger(f"   ❌ Error enviando álbum: {r.text[:200]}")
+        except Exception as e:
+            logger(f"   ❌ Excepción enviando álbum.")
+            ok = False
+        finally:
+            for f in files.values():
+                f.close()
+
+        if not ok:
+            return False
+
+        # Pequeña pausa entre paquetes para no saturar la API
+        if idx_paquete < total_paquetes - 1:
+            time.sleep(1)
+
+    return True
+
 def tiene_stream_video(path):
     try:
         result = subprocess.run(
@@ -67,42 +128,20 @@ def tiene_stream_video(path):
     except:
         return False
 
-def obtener_duracion_audio(path):
-    try:
-        result = subprocess.run([
-            'ffprobe', '-v', 'quiet',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            path
-        ], capture_output=True, text=True)
-        return float(result.stdout.strip())
-    except:
-        return None
-
 def es_post_carrusel(post_url):
-    """
-    Consulta el JSON del post para determinar si es carrusel o vídeo.
-    Devuelve True si es carrusel, False si es vídeo, None si no se puede determinar.
-    """
     result = subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
-        '--dump-json',
-        '--impersonate', 'chrome',
+        '--dump-json', '--impersonate', 'chrome',
         post_url
     ], capture_output=True, text=True)
 
     if result.returncode != 0 or not result.stdout.strip():
         return None
-
     try:
         info = json.loads(result.stdout)
-        # Si tiene el campo 'images' con contenido → carrusel
-        images = info.get('images') or []
-        if images:
+        if info.get('images'):
             return True
-        # Si tiene formats con vídeo → vídeo normal
-        formats = info.get('formats') or []
-        for fmt in formats:
+        for fmt in (info.get('formats') or []):
             if fmt.get('vcodec') and fmt['vcodec'] != 'none':
                 return False
         return None
@@ -110,135 +149,134 @@ def es_post_carrusel(post_url):
         return None
 
 def descargar_video_directo(video_id, post_url):
-    """
-    Intenta descargar un vídeo concreto por su URL directa.
-    Devuelve la ruta al mp4 si tiene éxito, None si falla.
-    """
     out_path = f"temp_media/{video_id}.mp4"
-    result = subprocess.run([
+    subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
         '--impersonate', 'chrome',
         '-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4',
-        '-o', out_path,
-        post_url
+        '-o', out_path, post_url
     ], capture_output=True)
 
     if os.path.exists(out_path) and tiene_stream_video(out_path):
         return out_path
-
-    # Limpiar si se creó pero está vacío o es inválido
     if os.path.exists(out_path):
         os.remove(out_path)
     return None
 
-def descargar_carrusel_gallerydl(video_id, post_url):
+def descargar_imagenes_gallerydl(img_dir, post_url):
+    """Intenta descargar imágenes con gallery-dl, con un reintento."""
+    for intento in range(1, 3):
+        if intento > 1:
+            logger(f"   🔄 Reintento {intento} con gallery-dl (espera {DELAY_REINTENTO}s)...")
+            time.sleep(DELAY_REINTENTO)
+
+        subprocess.run([
+            'gallery-dl', '--quiet', '-D', img_dir, post_url
+        ], capture_output=True, text=True)
+
+        fotos = []
+        for ext in ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.JPG', '*.PNG'):
+            fotos.extend(glob.glob(os.path.join(img_dir, ext)))
+        fotos = sorted(set(fotos))
+
+        if fotos:
+            logger(f"   🖼️ {len(fotos)} imágenes obtenidas con gallery-dl.")
+            return fotos
+
+    return []
+
+def descargar_imagenes_ytdlp(img_dir, post_url):
+    """Fallback: extrae URLs del JSON de yt-dlp y descarga con requests."""
+    logger(f"   🔄 Fallback: extrayendo imágenes desde yt-dlp JSON...")
+    result = subprocess.run([
+        'yt-dlp', '--quiet', '--no-warnings',
+        '--dump-json', '--impersonate', 'chrome',
+        post_url
+    ], capture_output=True, text=True)
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        info = json.loads(result.stdout)
+        images = info.get('images') or []
+        image_urls = []
+        for img in images:
+            if isinstance(img, dict):
+                url = img.get('url') or img.get('thumbnail') or img.get('original_url') or ''
+                if url:
+                    image_urls.append(url)
+            elif isinstance(img, str):
+                image_urls.append(img)
+
+        if not image_urls:
+            logger(f"   ⚠️ JSON no contiene imágenes.")
+            return []
+
+        fotos = []
+        for idx, img_url in enumerate(image_urls):
+            dest = os.path.join(img_dir, f"{idx:03d}.jpg")
+            try:
+                r = requests.get(img_url, timeout=15, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Referer': 'https://www.tiktok.com/'
+                })
+                if r.status_code == 200:
+                    with open(dest, 'wb') as f:
+                        f.write(r.content)
+                    fotos.append(dest)
+            except:
+                pass
+
+        if fotos:
+            logger(f"   🖼️ {len(fotos)} imágenes obtenidas con fallback yt-dlp.")
+        else:
+            logger(f"   ⚠️ Fallback yt-dlp tampoco obtuvo imágenes.")
+        return fotos
+    except:
+        return []
+
+def procesar_carrusel(video_id, post_url, caption):
+    """
+    Descarga las imágenes del carrusel y las envía como álbum(es) de Telegram.
+    No genera ningún vídeo — es mucho más rápido.
+    """
+    logger(f"   📸 Procesando carrusel como álbum de fotos...")
+
     img_dir = f"temp_media/img_{video_id}"
     os.makedirs(img_dir, exist_ok=True)
 
-    logger(f"   📥 Descargando imágenes con gallery-dl...")
-    subprocess.run([
-        'gallery-dl', '--quiet', '-D', img_dir, post_url
-    ], capture_output=True, text=True)
-
-    fotos = []
-    for ext in ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.JPG', '*.PNG'):
-        fotos.extend(glob.glob(os.path.join(img_dir, ext)))
-    fotos = sorted(set(fotos))
-
+    # Intentar gallery-dl primero, luego fallback yt-dlp
+    logger(f"   📥 Descargando imágenes...")
+    fotos = descargar_imagenes_gallerydl(img_dir, post_url)
     if not fotos:
-        logger(f"   ⚠️ gallery-dl no descargó imágenes.")
-        shutil.rmtree(img_dir, ignore_errors=True)
-        return None, None
+        fotos = descargar_imagenes_ytdlp(img_dir, post_url)
 
-    logger(f"   🖼️ {len(fotos)} imágenes descargadas.")
-    return fotos, img_dir
-
-def crear_slideshow(video_id, post_url):
-    logger(f"   📸 Procesando carrusel...")
-
-    output_video = f"temp_media/{video_id}_final.mp4"
-
-    fotos, img_dir = descargar_carrusel_gallerydl(video_id, post_url)
     if not fotos:
         logger(f"   ❌ No se pudieron obtener imágenes del carrusel.")
-        return None
-
-    # Descargar audio
-    audio_path = f"temp_media/{video_id}_audio.m4a"
-    logger(f"   🎵 Descargando audio...")
-    subprocess.run([
-        'yt-dlp', '--quiet', '--no-warnings',
-        '-f', 'bestaudio',
-        '--impersonate', 'chrome',
-        '-o', audio_path,
-        post_url
-    ], capture_output=True)
-
-    tiene_audio = os.path.exists(audio_path)
-    if not tiene_audio:
-        logger("   ⚠️ Audio no disponible.")
-
-    # Calcular duración por foto
-    dur_por_foto = DURACION_POR_FOTO
-    if tiene_audio:
-        dur_audio = obtener_duracion_audio(audio_path)
-        if dur_audio and len(fotos) > 0:
-            dur_por_foto = max(DURACION_POR_FOTO, dur_audio / len(fotos))
-            logger(f"   ⏱️ Audio: {dur_audio:.1f}s → {dur_por_foto:.1f}s por foto.")
-
-    logger(f"   🎬 Renderizando slideshow...")
-    try:
-        list_file = f"temp_media/list_{video_id}.txt"
-        with open(list_file, 'w') as f:
-            for foto in fotos:
-                f.write(f"file '{os.path.abspath(foto)}'\nduration {dur_por_foto}\n")
-            f.write(f"file '{os.path.abspath(fotos[-1])}'\n")
-
-        ffmpeg_cmd = [
-            'ffmpeg', '-y', '-v', 'error',
-            '-f', 'concat', '-safe', '0', '-i', list_file,
-        ]
-        if tiene_audio:
-            ffmpeg_cmd += ['-i', audio_path]
-        ffmpeg_cmd += [
-            '-c:v', 'libx264', '-r', '30', '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
-        ]
-        if tiene_audio:
-            ffmpeg_cmd += ['-shortest']
-        ffmpeg_cmd.append(output_video)
-
-        subprocess.run(ffmpeg_cmd, check=True)
-
-        os.remove(list_file)
         shutil.rmtree(img_dir, ignore_errors=True)
-        if tiene_audio and os.path.exists(audio_path):
-            os.remove(audio_path)
+        return False
 
-        return output_video
+    logger(f"   📨 Enviando {len(fotos)} fotos en álbum(es)...")
+    ok = enviar_album_fotos(fotos, caption)
 
-    except:
-        logger(f"   ❌ Error FFmpeg al renderizar slideshow.")
-        shutil.rmtree(img_dir, ignore_errors=True)
-        return None
+    shutil.rmtree(img_dir, ignore_errors=True)
+    return ok
 
 def obtener_ids_recientes(tiktok_url):
     result = subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
         '--dateafter', 'now-2day', '--playlist-end', '5',
         '--impersonate', 'chrome',
-        '--skip-download',
-        '--print', '%(id)s',
+        '--skip-download', '--print', '%(id)s',
         tiktok_url
     ], capture_output=True, text=True)
     return [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
 
 def descargar_videos_bulk(tiktok_url):
-    """Descarga en bloque todos los posts recientes del perfil."""
     logger("🚀 Descargando contenido reciente...")
     subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
-        '--dateafter', 'now-6day', '--playlist-end', '20',
+        '--dateafter', 'now-2day', '--playlist-end', '5',
         '--impersonate', 'chrome',
         '-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4',
         '-o', 'temp_media/%(id)s.%(ext)s',
@@ -257,17 +295,14 @@ for i, user in enumerate(USUARIOS, 1):
     caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
     tiktok_url = f'https://www.tiktok.com/{tiktok_user}'
 
-    # Paso 1: obtener IDs para tener URLs reales de cada post
     ids_recientes = obtener_ids_recientes(tiktok_url)
     id_url_map = {
         vid_id: f'https://www.tiktok.com/{tiktok_user}/video/{vid_id}'
         for vid_id in ids_recientes
     }
 
-    # Paso 2: descarga en bloque (vídeos normales caen aquí)
     descargar_videos_bulk(tiktok_url)
 
-    # Combinar IDs en disco + IDs reportados
     ids_en_temp = set(
         os.path.basename(f).split('.')[0].split('_')[0]
         for f in glob.glob("temp_media/*")
@@ -284,16 +319,17 @@ for i, user in enumerate(USUARIOS, 1):
             continue
 
         post_url = id_url_map.get(vid_id, f'https://www.tiktok.com/video/{vid_id}')
-        video_final = None
+        enviado = False
         path_mp4 = f"temp_media/{vid_id}.mp4"
 
         if os.path.exists(path_mp4) and tiene_stream_video(path_mp4):
-            # Descarga en bloque funcionó → vídeo listo
+            # Vídeo normal
             logger(f"   🎥 Post detectado como vídeo.")
-            video_final = path_mp4
-
+            if enviar_video(path_mp4, caption_tg):
+                enviado = True
+            else:
+                logger(f"   ❌ Fallo al enviar vídeo a Telegram.")
         else:
-            # No hay mp4 válido → consultar el tipo real del post
             if os.path.exists(path_mp4):
                 os.remove(path_mp4)
 
@@ -302,32 +338,33 @@ for i, user in enumerate(USUARIOS, 1):
 
             if tipo is True:
                 logger(f"   🖼️ Confirmado como carrusel.")
-                video_final = crear_slideshow(vid_id, post_url)
+                if procesar_carrusel(vid_id, post_url, caption_tg):
+                    enviado = True
 
             elif tipo is False:
-                # Es un vídeo pero la descarga en bloque falló → reintentar individualmente
-                logger(f"   🎥 Confirmado como vídeo. Reintentando descarga individual...")
-                video_final = descargar_video_directo(vid_id, post_url)
-                if not video_final:
-                    logger(f"   ❌ No se pudo descargar el vídeo.")
+                logger(f"   🎥 Confirmado como vídeo. Reintentando descarga...")
+                path = descargar_video_directo(vid_id, post_url)
+                if path and enviar_video(path, caption_tg):
+                    enviado = True
+                else:
+                    logger(f"   ❌ No se pudo descargar/enviar el vídeo.")
 
             else:
-                # No se pudo determinar el tipo → intentar vídeo primero, luego carrusel
+                # Tipo desconocido: intentar vídeo, luego carrusel
                 logger(f"   ❓ Tipo desconocido. Intentando como vídeo...")
-                video_final = descargar_video_directo(vid_id, post_url)
-                if not video_final:
+                path = descargar_video_directo(vid_id, post_url)
+                if path and enviar_video(path, caption_tg):
+                    enviado = True
+                else:
                     logger(f"   🖼️ Vídeo fallido, intentando como carrusel...")
-                    video_final = crear_slideshow(vid_id, post_url)
+                    if procesar_carrusel(vid_id, post_url, caption_tg):
+                        enviado = True
 
-        if video_final and os.path.exists(video_final):
-            logger(f"   📦 Enviando fichero ({os.path.getsize(video_final) // 1024} KB)...")
-            if enviar_video(video_final, caption_tg):
-                guardar_en_archive(vid_id)
-                archive_ids.add(vid_id)
-                enviados_cuenta += 1
-                logger(f"   ✅ Post enviado y archivado.")
-            else:
-                logger(f"   ❌ Fallo al enviar a Telegram.")
+        if enviado:
+            guardar_en_archive(vid_id)
+            archive_ids.add(vid_id)
+            enviados_cuenta += 1
+            logger(f"   ✅ Post enviado y archivado.")
         else:
             logger(f"   ⚠️ No se pudo procesar el post.")
 
