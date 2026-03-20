@@ -13,6 +13,7 @@ USUARIOS_RAW = os.getenv("LISTA_USUARIOS", "")
 USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.strip()]
 
 ARCHIVE = "archive.txt"
+DURACION_POR_FOTO = 3.5  # segundos por imagen en el slideshow
 
 def logger(mensaje):
     print(f"[LOG] {mensaje}", flush=True)
@@ -70,10 +71,22 @@ def tiene_stream_video(path):
     except:
         return False
 
+def obtener_duracion_audio(path):
+    """Devuelve la duración en segundos de un fichero de audio."""
+    try:
+        result = subprocess.run([
+            'ffprobe', '-v', 'quiet',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            path
+        ], capture_output=True, text=True)
+        return float(result.stdout.strip())
+    except:
+        return None
+
 def descargar_carrusel_gallerydl(video_id, post_url):
     """
     Usa gallery-dl para descargar las imágenes del carrusel directamente.
-    Es más fiable que yt-dlp para este tipo de contenido.
     """
     img_dir = f"temp_media/img_{video_id}"
     os.makedirs(img_dir, exist_ok=True)
@@ -87,14 +100,13 @@ def descargar_carrusel_gallerydl(video_id, post_url):
         post_url
     ], capture_output=True, text=True)
 
-    # Recoger imágenes descargadas
     fotos = []
     for ext in ('*.jpg', '*.jpeg', '*.png', '*.webp', '*.JPG', '*.PNG'):
         fotos.extend(glob.glob(os.path.join(img_dir, ext)))
     fotos = sorted(set(fotos))
 
     if not fotos:
-        logger(f"   ⚠️ gallery-dl no descargó imágenes. stderr: {result.stderr[:200] if result.stderr else 'vacío'}")
+        logger(f"   ⚠️ gallery-dl no descargó imágenes.")
         shutil.rmtree(img_dir, ignore_errors=True)
         return None, None
 
@@ -108,7 +120,6 @@ def crear_slideshow(video_id, post_url):
 
     # 1. Descargar imágenes con gallery-dl
     fotos, img_dir = descargar_carrusel_gallerydl(video_id, post_url)
-
     if not fotos:
         logger(f"   ❌ No se pudieron obtener imágenes del carrusel.")
         return None
@@ -128,14 +139,23 @@ def crear_slideshow(video_id, post_url):
     if not tiene_audio:
         logger("   ⚠️ Audio no disponible. El vídeo se creará sin sonido.")
 
-    # 3. Renderizar con FFmpeg
+    # 3. Calcular duración por foto para cubrir todo el audio
+    dur_por_foto = DURACION_POR_FOTO
+    if tiene_audio:
+        dur_audio = obtener_duracion_audio(audio_path)
+        if dur_audio and len(fotos) > 0:
+            # Distribuir el audio entre todas las fotos equitativamente
+            dur_por_foto = max(DURACION_POR_FOTO, dur_audio / len(fotos))
+            logger(f"   ⏱️ Audio: {dur_audio:.1f}s → {dur_por_foto:.1f}s por foto.")
+
+    # 4. Renderizar con FFmpeg
     logger(f"   🎬 Renderizando slideshow...")
     try:
         list_file = f"temp_media/list_{video_id}.txt"
         with open(list_file, 'w') as f:
             for foto in fotos:
-                f.write(f"file '{os.path.abspath(foto)}'\nduration 2.5\n")
-            # Repetir la última foto para que el concat funcione correctamente
+                f.write(f"file '{os.path.abspath(foto)}'\nduration {dur_por_foto}\n")
+            # Repetir la última foto (requerido por ffmpeg concat)
             f.write(f"file '{os.path.abspath(fotos[-1])}'\n")
 
         ffmpeg_cmd = [
@@ -152,6 +172,7 @@ def crear_slideshow(video_id, post_url):
         ]
 
         if tiene_audio:
+            # Usar el audio como referencia de duración final
             ffmpeg_cmd += ['-shortest']
 
         ffmpeg_cmd.append(output_video)
@@ -170,29 +191,35 @@ def crear_slideshow(video_id, post_url):
         shutil.rmtree(img_dir, ignore_errors=True)
         return None
 
-def procesar_descarga(tiktok_url, user_slug):
+def obtener_ids_recientes(tiktok_url):
     """
-    Descarga los posts recientes y devuelve un mapeo {video_id: post_url}.
-    Usamos --print para capturar los IDs sin necesidad de parsear ficheros.
+    Paso 1: solo obtener los IDs de los posts recientes sin descargar nada.
     """
-    logger("🚀 Escaneando actividad reciente...")
     result = subprocess.run([
         'yt-dlp', '--quiet', '--no-warnings',
         '--dateafter', 'now-2day', '--playlist-end', '5',
         '--impersonate', 'chrome',
-        '-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4',
+        '--skip-download',
         '--print', '%(id)s',
-        '-o', 'temp_media/%(id)s.%(ext)s',
         tiktok_url
     ], capture_output=True, text=True)
 
-    id_url_map = {}
-    for vid_id in result.stdout.strip().splitlines():
-        vid_id = vid_id.strip()
-        if vid_id:
-            id_url_map[vid_id] = f'https://www.tiktok.com/{user_slug}/video/{vid_id}'
+    ids = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+    return ids
 
-    return id_url_map
+def descargar_videos(tiktok_url):
+    """
+    Paso 2: descargar los ficheros reales (vídeos y audio de carruseles).
+    """
+    logger("🚀 Descargando contenido reciente...")
+    subprocess.run([
+        'yt-dlp', '--quiet', '--no-warnings',
+        '--dateafter', 'now-2day', '--playlist-end', '5',
+        '--impersonate', 'chrome',
+        '-f', 'bestvideo+bestaudio/best', '--merge-output-format', 'mp4',
+        '-o', 'temp_media/%(id)s.%(ext)s',
+        tiktok_url
+    ], capture_output=True)
 
 # --- EJECUCIÓN ---
 verificar_dependencias()
@@ -204,10 +231,16 @@ for i, user in enumerate(USUARIOS, 1):
     tiktok_user = user if user.startswith('@') else f'@{user}'
     user_hashtag = re.sub(r'[^a-zA-Z0-9_]', '_', user.lstrip('@'))
     caption_tg = f'🎬 Nuevo de: <a href="https://www.tiktok.com/{tiktok_user}">{user}</a>\n\n#{user_hashtag}'
+    tiktok_url = f'https://www.tiktok.com/{tiktok_user}'
 
-    id_url_map = procesar_descarga(f'https://www.tiktok.com/{tiktok_user}', tiktok_user)
+    # Paso 1: obtener IDs para construir URLs reales de cada post
+    ids_recientes = obtener_ids_recientes(tiktok_url)
+    id_url_map = {vid_id: f'https://www.tiktok.com/{tiktok_user}/video/{vid_id}' for vid_id in ids_recientes}
 
-    # IDs encontrados en disco + IDs reportados por yt-dlp (carruseles que no generan mp4)
+    # Paso 2: descargar ficheros
+    descargar_videos(tiktok_url)
+
+    # Combinar IDs en disco + IDs reportados (carruseles sin mp4)
     ids_en_temp = set(
         os.path.basename(f).split('.')[0].split('_')[0]
         for f in glob.glob("temp_media/*")
@@ -225,7 +258,6 @@ for i, user in enumerate(USUARIOS, 1):
                     pass
             continue
 
-        # URL real del post para gallery-dl y yt-dlp
         post_url = id_url_map.get(vid_id, f'https://www.tiktok.com/video/{vid_id}')
 
         video_final = None
