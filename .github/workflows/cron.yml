@@ -48,6 +48,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           LISTA_USUARIOS: ${{ secrets.LISTA_USUARIOS }}
+          ARCHIVE_FILE: "archive.txt"
         run: python main.py
 
       # 5. Volver a encriptar el archivo actualizado y borrar la versión en texto plano
