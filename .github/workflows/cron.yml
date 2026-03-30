@@ -13,6 +13,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       # --- LA SOLUCIÓN RÁPIDA Y SIN ERRORES ---
       - name: Instalar FFmpeg (Binario directo)
