@@ -44,6 +44,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           LISTA_USUARIOS: ${{ secrets.LISTA_USUARIOS2 }}
+          ARCHIVE_FILE: "archive2.txt"
         run: python main.py 
 
       # Volvemos a cifrar asegurándonos de usar el nombre "archive2"
