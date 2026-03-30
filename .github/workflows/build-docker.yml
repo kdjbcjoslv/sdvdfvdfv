@@ -1,0 +1,34 @@
+name: Construir y Subir Docker
+
+# Solo se ejecutará cuando modifiques el Dockerfile o lo lances a mano
+on:
+  push:
+    paths:
+      - 'Dockerfile'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesión en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir y subir imagen
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # Usamos el nombre de tu repo en minúsculas
+          tags: ghcr.io/kdjbcjoslv/sdvdfvdfv:latest
