@@ -1,0 +1,72 @@
+name: Download - Parte 2
+
+on:
+  workflow_dispatch:
+
+# Grupo de concurrencia diferente para no cancelar el Cron 1
+concurrency:
+  group: descarga-p2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  descarga:
+    runs-on: ubuntu-latest
+    
+    # Usamos EXACTAMENTE LA MISMA imagen Docker (ya tiene todo preinstalado)
+    container:
+      image: ghcr.io/kdjbcjoslv/sdvdfvdfv:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Instalar Git y GPG
+        run: apt-get update && apt-get install -y git gnupg
+
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      # ¡IMPORTANTE! Aquí usamos archive2.txt y archive2.txt.gpg
+      - name: Abrir historial cifrado 2
+        env:
+          GPG_KEY: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -f archive2.txt.gpg ]; then
+            gpg --quiet --batch --yes --decrypt --passphrase="$GPG_KEY" --output archive2.txt archive2.txt.gpg
+          else
+            touch archive2.txt
+          fi
+
+      # Aquí debes ejecutar la segunda mitad de tu lógica. 
+      # Puede ser un script distinto (ej: main2.py) o el mismo pasándole un argumento.
+      - name: Ejecutar Script Ninja (Parte 2)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LISTA_USUARIOS: ${{ secrets.LISTA_USUARIOS2 }}
+        run: python main2.py 
+
+      # Volvemos a cifrar asegurándonos de usar el nombre "archive2"
+      - name: Cerrar caja fuerte y cifrar 2
+        env:
+          GPG_KEY: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          gpg --quiet --batch --yes --symmetric --passphrase="$GPG_KEY" --output archive2.txt.gpg archive2.txt
+          rm archive2.txt
+
+      - name: Guardar historial y subir cambios
+        run: |
+          git config --global --add safe.directory '*'
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Añadimos el archivo 2
+          git add archive2.txt.gpg
+          
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "Historial actualizado Parte 2 (Cifrado)"
+            git pull --rebase origin main
+            git push
+          else
+            echo "No hay datos nuevos que guardar en el historial."
+          fi
