@@ -1,29 +1,37 @@
 name: Download
+
 on:
   workflow_dispatch:
+  # Descomenta las siguientes 2 líneas cuando quieras activar la ejecución automática cada 10 minutos
+  # schedule:
+  #   - cron: '*/10 * * * *'
+
+# Previene que múltiples ejecuciones choquen entre sí
+concurrency:
+  group: descarga-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   descarga:
     runs-on: ubuntu-latest
+    
+    # Aquí llamamos a tu entorno Docker preinstalado (ultra rápido)
+    container:
+      image: ghcr.io/kdjbcjoslv/sdvdfvdfv:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
+      # 1. Instalar utilidades básicas que no vienen en la imagen slim de Python
+      - name: Instalar Git y GPG
+        run: apt-get update && apt-get install -y git gnupg
+
+      # 2. Descargar el código del repositorio
       - name: Descargar código
         uses: actions/checkout@v4
 
-      - name: Configurar Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      # --- LA SOLUCIÓN RÁPIDA Y SIN ERRORES ---
-      - name: Instalar FFmpeg (Binario directo)
-        uses: FedericoCarboni/setup-ffmpeg@v3
-        with:
-          ffmpeg-version: 'release'
-
-      - name: Instalar herramientas Python
-        run: pip install yt-dlp requests curl-cffi gallery-dl
-
+      # 3. Desencriptar el historial si existe, o crearlo si no existe
       - name: Abrir historial cifrado
         env:
           GPG_KEY: ${{ secrets.GPG_PASSPHRASE }}
@@ -34,6 +42,7 @@ jobs:
             touch archive.txt
           fi
 
+      # 4. Ejecutar tu script principal
       - name: Ejecutar Script Ninja
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -41,6 +50,7 @@ jobs:
           LISTA_USUARIOS: ${{ secrets.LISTA_USUARIOS }}
         run: python main.py
 
+      # 5. Volver a encriptar el archivo actualizado y borrar la versión en texto plano
       - name: Cerrar caja fuerte y cifrar
         env:
           GPG_KEY: ${{ secrets.GPG_PASSPHRASE }}
@@ -48,11 +58,19 @@ jobs:
           gpg --quiet --batch --yes --symmetric --passphrase="$GPG_KEY" --output archive.txt.gpg archive.txt
           rm archive.txt
 
+      # 6. Configurar Git, hacer commit solo si hay cambios, descargar novedades y subir
       - name: Guardar historial y subir cambios
         run: |
+          git config --global --add safe.directory '*'
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          
           git add archive.txt.gpg
-          git commit -m "Historial actualizado (Cifrado)" || exit 0
-          git pull --rebase origin main
-          git push
+          
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "Historial actualizado (Cifrado)"
+            git pull --rebase origin main
+            git push
+          else
+            echo "No hay datos nuevos que guardar en el historial."
+          fi
