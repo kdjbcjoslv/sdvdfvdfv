@@ -13,7 +13,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USUARIOS_RAW = os.getenv("LISTA_USUARIOS", "")
 USUARIOS = [u.strip() for u in USUARIOS_RAW.replace('\n', ',').split(",") if u.strip()]
 
-ARCHIVE = "archive.txt"
+ARCHIVE = os.getenv("ARCHIVE_FILE", "archive.txt")
 DELAY_REINTENTO = 8  # segundos entre reintentos de gallery-dl
 
 def logger(mensaje):
