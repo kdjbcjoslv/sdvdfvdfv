@@ -1,5 +1,5 @@
 # 1. Usar una imagen oficial de Python ligera como base
-FROM python:3.1 1
+FROM python:3.11-slim
 
 # 2. Variables de entorno para que Python no guarde basura y los logs se vean bien en GitHub Actions
 ENV PYTHONDONTWRITEBYTECODE=1
